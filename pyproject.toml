@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cernion-forecast-cli"
+version = "0.1.0"
+description = "CLI for the Cernion Forecast Sandbox and tenant-bound load profile forecast API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "STROMDAO / Cernion"}]
+dependencies = []
+
+[project.scripts]
+cernion-forecast = "cernion_forecast_cli.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
