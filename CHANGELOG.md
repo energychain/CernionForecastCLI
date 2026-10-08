@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The project follows semantic-versioning intent. Before `1.0.0`, command names and core artifact names are intended to be stable, but JSON artifact details may still evolve when necessary.
 
-## [0.2.0] - 2026-10-08
+## [0.2.0] - 2026-10-09
 
 ### Added
 
