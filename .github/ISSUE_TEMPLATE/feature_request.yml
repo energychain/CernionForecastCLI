@@ -1,0 +1,59 @@
+name: Feature request
+description: Suggest a CLI improvement or integration workflow
+title: "feature: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the operational problem, not only the desired flag. Do not include private customer data or API tokens.
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Operational workflow
+      description: What user/system would use this and in which step of the forecast process?
+      placeholder: "Daily EDM export -> history dry-run -> import -> train/predict -> score -> report"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - input validation
+        - JSON/CSV import
+        - MSCONS/EDIFACT import
+        - weather/site context
+        - training/prediction orchestration
+        - scoring/acceptance
+        - batch/idempotency/logging
+        - documentation/examples
+        - packaging/CI
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety checklist
+      options:
+        - label: This request can be discussed without real customer data, non-public MSCONS payloads or tokens.
+          required: true

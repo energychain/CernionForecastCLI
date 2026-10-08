@@ -7,10 +7,42 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - run: python -m unittest discover -s tests -v
-      - run: python -m compileall src tests
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: python -m pip install -e .
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Compile check
+        run: python -m compileall src tests
+      - name: CLI smoke
+        run: |
+          cernion-forecast --help
+          cernion-forecast describe
+      - name: Validate examples without API writes
+        run: |
+          cernion-forecast history --dry-run \
+            --series-id synthetic-meter-42 \
+            --input examples/data/synthetic_history_35d.json \
+            --quality-policy strict \
+            --expected-intervals auto \
+            --location Berlin \
+            --weather-region DE-BE-Berlin \
+            --country DE \
+            --out runs/ci/synthetic-history-dry-run
+          cernion-forecast score \
+            --series-id synthetic-meter-42 \
+            --predictions examples/predictions/synthetic_previous_week_prediction_2026-09-29.json \
+            --actuals examples/data/synthetic_actuals_2026-09-29.json \
+            --out runs/ci/synthetic-score
+      - name: Build package
+        run: |
+          python -m pip install build
+          python -m build

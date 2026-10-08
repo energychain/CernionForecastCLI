@@ -1,10 +1,16 @@
 # Cernion Forecast CLI
 
+[![CI](https://github.com/energychain/CernionForecastCLI/actions/workflows/ci.yml/badge.svg)](https://github.com/energychain/CernionForecastCLI/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+
 Open-source command line client for using forecast capabilities provided by Cernion Energy Tools (CET) from existing operational systems.
 
 The package is a value-added integration tool: it does **not** run local ML training and it is not the forecasting product by itself. Business value comes from connecting Stadtwerke, Direktvermarkter and service-provider workflows to the hosted CET forecast API while preserving the operational context needed for daily work: meter identity, weather/site context, market-message provenance, run artifacts and forecast-quality evidence. API tokens are never stored in result files.
 
 Default API base URL: `https://api.cernion.de`
+
+Local commands such as `history --dry-run`, `score`, `acceptance-test`, `describe` and the bundled examples work without a token. Tenant-bound live commands such as `history`, `train`, `predict`, `enroll` and `e2e` require a Cernion API token.
 
 ## Business value
 
@@ -45,14 +51,53 @@ The CLI is therefore the integration and provenance layer around CET forecast ca
 ## Install from source
 
 ```bash
-git clone <repo-url>
-cd cernion-forecast-cli
+git clone https://github.com/energychain/CernionForecastCLI.git
+cd CernionForecastCLI
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
 ```
 
 No runtime dependency is required for JSON/CSV workflows.
+
+## Quickstart without a CET token
+
+Use the synthetic examples to validate the CLI locally without API credentials:
+
+```bash
+cernion-forecast history --dry-run \
+  --series-id synthetic-meter-42 \
+  --input examples/data/synthetic_history_35d.json \
+  --out runs/quickstart-history
+
+cernion-forecast score \
+  --series-id synthetic-meter-42 \
+  --predictions examples/predictions/synthetic_previous_week_prediction_2026-09-29.json \
+  --actuals examples/data/synthetic_actuals_2026-09-29.json \
+  --out runs/quickstart-score
+
+cernion-forecast acceptance-test \
+  --series-id synthetic-meter-42 \
+  --predictions examples/predictions/synthetic_previous_week_prediction_2026-09-29.json \
+  --actuals examples/data/synthetic_actuals_2026-09-29.json \
+  --history examples/data/synthetic_history_35d.json \
+  --acceptance-profile monitoring \
+  --require-better-than previous-week \
+  --out runs/quickstart-acceptance
+```
+
+Expected result: the dry-run validates 35 days of synthetic history, `score` writes metrics/residuals, and `acceptance-test` writes an acceptance report without calling CET.
+
+## Quickstart with a CET token
+
+Tenant-bound history/train/predict/E2E calls require a CET token. Keep token files outside the repository.
+
+```bash
+chmod 600 /path/to/cet-token.txt
+cernion-forecast doctor --token-file /path/to/cet-token.txt --out runs/doctor-live
+```
+
+Then run `e2e` with your own history and actuals. Provide at least 28 observed history days up to D-2; see [E2E acceptance](docs/e2e-acceptance.md).
 
 ## Synthetic examples
 
@@ -485,6 +530,16 @@ python3 -m compileall src tests
 ```
 
 A live smoke against the public sandbox can be run without a token. Tenant-bound product calls need a valid `CET_API_TOKEN`.
+
+## Community and security
+
+- See `CONTRIBUTING.md` for development setup, test expectations and data-safety rules.
+- See `SECURITY.md` for private vulnerability reporting guidance.
+- See `SUPPORT.md` for public support boundaries and safe live-API issue data.
+- See `CHANGELOG.md` for release notes.
+- See `docs/input-formats.md`, `docs/e2e-acceptance.md`, `docs/troubleshooting.md` and `docs/release.md` for focused operator and maintainer documentation.
+- Issues and pull requests should use the templates under `.github/`.
+- Do not post API tokens, real customer data, private MSCONS/EDIFACT payloads or non-public market communication content in issues or PRs.
 
 ## License
 

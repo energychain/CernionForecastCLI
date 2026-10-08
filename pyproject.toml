@@ -8,9 +8,40 @@ version = "0.2.0"
 description = "Value-added CLI integration layer for Cernion Energy Tools forecast capabilities"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
 authors = [{name = "STROMDAO / Cernion"}]
+maintainers = [{name = "STROMDAO / Cernion"}]
+keywords = [
+  "cernion",
+  "forecast",
+  "energy",
+  "utilities",
+  "load-profile",
+  "mscons",
+  "edifact",
+  "cli",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Office/Business",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Topic :: Utilities",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/energychain/CernionForecastCLI"
+Repository = "https://github.com/energychain/CernionForecastCLI"
+Issues = "https://github.com/energychain/CernionForecastCLI/issues"
+Changelog = "https://github.com/energychain/CernionForecastCLI/blob/main/CHANGELOG.md"
 
 [project.scripts]
 cernion-forecast = "cernion_forecast_cli.cli:main"
