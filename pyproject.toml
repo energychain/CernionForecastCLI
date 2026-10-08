@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cernion-forecast-cli"
-version = "0.1.0"
-description = "CLI for the Cernion Forecast Sandbox and tenant-bound load profile forecast API"
+version = "0.2.0"
+description = "Value-added CLI integration layer for Cernion Energy Tools forecast capabilities"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}

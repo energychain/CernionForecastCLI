@@ -10,6 +10,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV = {**os.environ, 'PYTHONPATH': str(ROOT / 'src')}
+SAMPLE_MSCONS = ''.join([
+    "UNH+1+MSCONS:D:04B:UN:2.3e'",
+    "BGM+7+DOC20261006001+9'",
+    "DTM+137:20261007:102'",
+    "NAD+MS+990****0003::293'",
+    "NAD+MR+990****0008::293'",
+    "LOC+172+DE0003966698900000000000052335107'",
+    "CCI+11++Z06'",
+    "QTY+220:1.25:KWH'",
+    "DTM+163:202610060000:303'",
+    "DTM+164:202610060015:303'",
+    "STS+7++67'",
+    "QTY+220:1.50:KWH'",
+    "DTM+163:202610060015:303'",
+    "DTM+164:202610060030:303'",
+    "STS+7++79'",
+    "UNT+16+1'",
+])
 
 
 def run_cli(*args, env=None):
@@ -50,7 +68,14 @@ class FakeAPI:
                 if self.path.endswith('/api/jobs/job/status'):
                     self.reply({'status': 'completed'})
                 elif self.path.endswith('/api/forecast-sandbox/consumption/portfolio/runs/' + 'a'*64):
-                    self.reply({'status': 'completed', 'result': {'status': 'completed', 'model_version': 'b'*64, 'forecast_for': '2026-09-28'}})
+                    self.reply({'status': 'completed', 'result': {'status': 'completed', 'series_id': 'meter-a', 'model_version': 'b'*64, 'forecast_for': '2026-09-28', 'forecast_values': []}})
+                elif self.path.endswith('/api/forecast-sandbox/consumption/portfolio/runs/' + 'e'*64):
+                    self.reply({'status': 'error', 'error': 'portfolio_failed: missing dependency'})
+                elif self.path.endswith('/api/forecast-sandbox/consumption/portfolio/runs/' + 'd'*64):
+                    self.reply({'status': 'completed', 'result': {'status': 'completed', 'series_id': 'meter-a', 'model_version': 'b'*64, 'forecast_for': '2026-09-29', 'forecast_values': [
+                        {'timestamp': '2026-09-28T00:00:00+02:00', 'predicted_value': 10.5},
+                        {'timestamp': '2026-09-28T00:15:00+02:00', 'predicted_value': 11.5},
+                    ]}})
                 else:
                     self.send_response(404); self.end_headers()
 
@@ -68,7 +93,13 @@ class FakeAPI:
                     self.send_response(202)
                     self.send_header('Content-Type', 'application/json')
                     self.end_headers()
-                    self.wfile.write(json.dumps({'jobId': 'job', 'run_id': 'a'*64, 'status': 'queued'}).encode())
+                    run_id = 'e'*64 if 'error-meter' in payload.get('series_ids', []) else 'a'*64
+                    self.wfile.write(json.dumps({'jobId': 'job', 'run_id': run_id, 'status': 'queued'}).encode())
+                elif self.path.endswith('/predict'):
+                    self.send_response(202)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'jobId': 'job', 'run_id': 'd'*64, 'status': 'queued'}).encode())
                 else:
                     self.send_response(404); self.end_headers()
 
@@ -89,7 +120,7 @@ class CLITests(unittest.TestCase):
                 hist = tmp / 'history.json'
                 hist.write_text(json.dumps({'values': [{'ts': '2026-08-01T00:00:00+02:00', 'value': 1.0}]}))
                 out = tmp / 'out'
-                p = run_cli('day-ahead', '--base-url', api.url, '--series-id', 'meter-1', '--forecast-for', '2026-09-16', '--history', str(hist), '--out', str(out))
+                p = run_cli('day-ahead', '--base-url', api.url, '--series-id', 'meter-1', '--forecast-for', '2026-09-16', '--history', str(hist), '--weather-region', 'DE-BY-Kempten-87435', '--location', 'Kempten', '--out', str(out))
                 self.assertEqual(p.returncode, 0, p.stderr)
                 result = json.loads((out / 'result.json').read_text())
                 self.assertEqual(result['result']['status'], 'ok')
@@ -97,6 +128,51 @@ class CLITests(unittest.TestCase):
                 post = [c for c in api.calls if c[1].endswith('/day-ahead')][0]
                 self.assertEqual(post[2]['seriesId'], 'meter-1')
                 self.assertEqual(post[2]['granularity'], 'PT15M')
+                self.assertEqual(post[2]['forecast_context']['weather_region'], 'DE-BY-Kempten-87435')
+                self.assertEqual(post[2]['options']['forecastContext']['location'], 'Kempten')
+        finally:
+            api.close()
+
+    def test_day_ahead_accepts_weather_region_and_location_context(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                hist = tmp / 'history.json'
+                hist.write_text(json.dumps({'values': [{'ts': '2026-08-01T00:00:00+02:00', 'value': 1.0}]}))
+                out = tmp / 'out'
+                p = run_cli(
+                    'day-ahead', '--base-url', api.url, '--series-id', 'meter-1',
+                    '--forecast-for', '2026-09-16', '--history', str(hist), '--out', str(out),
+                    '--weather-region', 'DE-BY-Kempten-87435', '--postal-code', '87435',
+                    '--municipality', 'Kempten', '--latitude', '47.726', '--longitude', '10.314'
+                )
+                self.assertEqual(p.returncode, 0, p.stderr)
+                post = [c for c in api.calls if c[1].endswith('/day-ahead')][0]
+                self.assertEqual(post[2]['weather_region'], 'DE-BY-Kempten-87435')
+                self.assertEqual(post[2]['site_context']['postal_code'], '87435')
+                self.assertEqual(post[2]['site_context']['municipality'], 'Kempten')
+                self.assertEqual(post[2]['site_context']['latitude'], 47.726)
+                self.assertEqual(post[2]['site_context']['longitude'], 10.314)
+        finally:
+            api.close()
+
+    def test_rejects_national_smard_as_weather_location_context(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                hist = tmp / 'history.json'
+                hist.write_text(json.dumps({'values': [{'ts': '2026-08-01T00:00:00+02:00', 'value': 1.0}]}))
+                p = run_cli(
+                    'day-ahead', '--base-url', api.url, '--series-id', 'meter-1',
+                    '--forecast-for', '2026-09-16', '--history', str(hist),
+                    '--weather-region', 'DE-National-SMARD', '--location', 'Germany',
+                    '--out', str(tmp / 'out')
+                )
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn('location must be a city', p.stderr)
+                self.assertFalse(api.calls)
         finally:
             api.close()
 
@@ -106,12 +182,81 @@ class CLITests(unittest.TestCase):
             dataset = tmp / 'meter.json'
             dataset.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.2}]}))
             out = tmp / 'plan'
-            p = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'meter-a', '--input', str(dataset), '--out', str(out))
+            p = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'meter-a', '--input', str(dataset), '--weather-region', 'DE-BY-Kempten-87435', '--out', str(out))
             self.assertEqual(p.returncode, 0, p.stderr)
             run = json.loads((out / 'run.json').read_text())
             self.assertEqual(run['operation'], 'history')
             self.assertEqual(run['status'], 'dry_run')
             self.assertEqual(run['inputs'][0]['series_id'], 'meter-a')
+            self.assertEqual(run['forecast_context']['weather_region'], 'DE-BY-Kempten-87435')
+
+    def test_history_dry_run_keeps_weather_region_and_site_context(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            dataset = tmp / 'meter.json'
+            dataset.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.2}]}))
+            out = tmp / 'plan'
+            p = run_cli(
+                'history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'meter-a',
+                '--input', str(dataset), '--weather-region', 'DE-BY-Kempten-87435',
+                '--postal-code', '87435', '--municipality', 'Kempten', '--out', str(out)
+            )
+            self.assertEqual(p.returncode, 0, p.stderr)
+            run = json.loads((out / 'run.json').read_text())
+            self.assertEqual(run['weather_region'], 'DE-BY-Kempten-87435')
+            self.assertEqual(run['site_context']['postal_code'], '87435')
+            self.assertEqual(run['site_context']['municipality'], 'Kempten')
+            self.assertEqual(run['request']['weather_region'], 'DE-BY-Kempten-87435')
+
+
+    def test_mscons_history_dry_run_preserves_envelope_provenance(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            mscons = tmp / 'meter.mscons'
+            mscons.write_text(SAMPLE_MSCONS, encoding='utf-8')
+            out = tmp / 'plan'
+            p = run_cli(
+                'history', '--dry-run', '--tenant-id', 'tenant-a',
+                '--series-id', 'DE0003966698900000000000052335107',
+                '--input', str(mscons), '--out', str(out)
+            )
+            self.assertEqual(p.returncode, 0, p.stderr)
+            run = json.loads((out / 'run.json').read_text())
+            self.assertEqual(run['inputs'][0]['source_format'], 'MSCONS')
+            self.assertEqual(run['inputs'][0]['document_number'], 'DOC20261006001')
+            self.assertEqual(run['input_provenance'][0]['source_format'], 'MSCONS')
+            self.assertEqual(run['input_provenance'][0]['document_number'], 'DOC20261006001')
+            self.assertEqual(run['input_provenance'][0]['sender']['id'], '990****0003')
+            self.assertEqual(run['input_provenance'][0]['receiver']['id'], '990****0008')
+            self.assertEqual(run['input_provenance'][0]['melo_id'], 'DE0003966698900000000000052335107')
+            self.assertEqual(run['input_provenance'][0]['obis'], '1-0:1.8.0')
+
+    def test_mscons_history_posts_dataset_with_source_envelope(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                mscons = tmp / 'meter.edi'
+                mscons.write_text(SAMPLE_MSCONS, encoding='utf-8')
+                out = tmp / 'history'
+                p = run_cli(
+                    'history', '--base-url', api.url, '--tenant-id', 'tenant-a',
+                    '--series-id', 'DE0003966698900000000000052335107',
+                    '--input', str(mscons), '--out', str(out), env={'CET_API_TOKEN': 'ck_secret'}
+                )
+                self.assertEqual(p.returncode, 0, p.stderr)
+                history_post = [c for c in api.calls if c[1].endswith('/history')][0][2]
+                dataset = history_post['dataset']
+                self.assertEqual(dataset['unit'], 'kWh')
+                self.assertEqual([v['quality'] for v in dataset['values']], ['measured', 'estimated'])
+                self.assertEqual(dataset['source']['format'], 'mscons')
+                self.assertEqual(dataset['source']['documentNumber'], 'DOC20261006001')
+                self.assertEqual(dataset['source_envelope']['format'], 'MSCONS')
+                self.assertEqual(dataset['source_envelope']['document_number'], 'DOC20261006001')
+                result = json.loads((out / 'result.json').read_text())
+                self.assertEqual(result['input_provenance'][0]['document_number'], 'DOC20261006001')
+        finally:
+            api.close()
 
     def test_enroll_verifies_token_imports_history_then_trains_without_leaking_token(self):
         api = FakeAPI()
@@ -135,6 +280,51 @@ class CLITests(unittest.TestCase):
         finally:
             api.close()
 
+    def test_history_accepts_mscons_and_preserves_envelope_provenance(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                mscons = tmp / 'meter.edi'
+                mscons.write_text(SAMPLE_MSCONS)
+                out = tmp / 'mscons-history'
+                p = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(mscons), '--out', str(out), env={'CET_API_TOKEN': 'ck_supersecret'})
+                self.assertEqual(p.returncode, 0, p.stderr)
+                post = [c for c in api.calls if c[1].endswith('/history')][0]
+                dataset = post[2]['dataset']
+                self.assertEqual(dataset['series_id'], 'meter-a')
+                self.assertEqual(dataset['values'][0]['timestamp'], '2026-10-06T00:00:00+00:00')
+                self.assertEqual(dataset['values'][1]['quality'], 'estimated')
+                self.assertEqual(dataset['source']['format'], 'mscons')
+                self.assertEqual(dataset['source']['documentNumber'], 'DOC20261006001')
+                self.assertEqual(dataset['source_envelope']['location']['melo_id'], 'DE0003966698900000000000052335107')
+                run = json.loads((out / 'run.json').read_text())
+                self.assertEqual(run['input_provenance'][0]['document_number'], 'DOC20261006001')
+                result = json.loads((out / 'result.json').read_text())
+                self.assertEqual(result['input_provenance'][0]['source_format'], 'MSCONS')
+        finally:
+            api.close()
+
+    def test_predict_copies_model_input_provenance_to_result(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                model_file = tmp / 'model.json'
+                model_file.write_text(json.dumps({
+                    'tenant_id': 'tenant-a',
+                    'result': {'model_version': 'b' * 64},
+                    'input_provenance': [{'source_format': 'MSCONS', 'document_number': 'DOC20261006001', 'melo_id': 'DE0003966698900000000000052335107', 'obis': '1-0:1.8.0'}],
+                }))
+                out = tmp / 'predict'
+                p = run_cli('predict', '--base-url', api.url, '--series-id', 'meter-a', '--model-file', str(model_file), '--forecast-for', '2026-09-29', '--out', str(out), env={'CET_API_TOKEN': 'ck_supersecret'})
+                self.assertEqual(p.returncode, 0, p.stderr)
+                result = json.loads((out / 'result.json').read_text())
+                self.assertEqual(result['result']['input_provenance'][0]['document_number'], 'DOC20261006001')
+                self.assertEqual(result['result']['source_provenance']['last_history_message']['meloId'], 'DE0003966698900000000000052335107')
+        finally:
+            api.close()
+
     def test_score_rejects_partial_actuals_unless_explicit(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -147,6 +337,238 @@ class CLITests(unittest.TestCase):
             self.assertIn('Missing actual values', p.stderr)
             p2 = run_cli('score', '--series-id', 'meter-a', '--predictions', str(prediction), '--actuals', str(actual), '--allow-partial', '--out', str(tmp / 'score2'))
             self.assertEqual(p2.returncode, 0, p2.stderr)
+
+    def test_acceptance_test_compares_forecast_against_naive_benchmarks(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            actual_values = []
+            pred_values = []
+            history_values = []
+            for i in range(96):
+                hh, mm = divmod(i * 15, 60)
+                actual_values.append({'timestamp': f'2026-09-28T{hh:02d}:{mm:02d}:00+02:00', 'value': 100.0})
+                pred_values.append({'timestamp': f'2026-09-28T{hh:02d}:{mm:02d}:00+02:00', 'predicted_value': 102.0})
+                history_values.append({'timestamp': f'2026-09-27T{hh:02d}:{mm:02d}:00+02:00', 'value': 120.0})
+                history_values.append({'timestamp': f'2026-09-21T{hh:02d}:{mm:02d}:00+02:00', 'value': 130.0})
+            actual = tmp / 'actual.json'; actual.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': actual_values}))
+            history = tmp / 'history.json'; history.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': history_values}))
+            pred = tmp / 'pred.json'; pred.write_text(json.dumps({'tenant_id': 'tenant-a', 'result': {'series_id': 'meter-a', 'unit': 'kWh', 'forecast_values': pred_values}}))
+            out = tmp / 'accept'
+            p = run_cli('acceptance-test', '--series-id', 'meter-a', '--predictions', str(pred), '--actuals', str(actual), '--history', str(history), '--acceptance-profile', 'portfolio', '--require-better-than', 'persistence', '--min-relative-improvement', '0.05', '--max-wape', '5', '--out', str(out))
+            self.assertEqual(p.returncode, 0, p.stderr)
+            report = json.loads((out / 'acceptance_report.json').read_text())
+            self.assertEqual(report['status'], 'pass')
+            self.assertLess(report['model']['wape_percent'], report['benchmarks']['persistence']['wape_percent'])
+            self.assertTrue(report['decision']['better_than_persistence'])
+            self.assertTrue((out / 'acceptance_report.md').exists())
+
+    def test_acceptance_test_fails_when_forecast_is_not_better_than_benchmark(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            actual_values = []
+            pred_values = []
+            history_values = []
+            for i in range(96):
+                hh, mm = divmod(i * 15, 60)
+                actual_values.append({'timestamp': f'2026-09-28T{hh:02d}:{mm:02d}:00+02:00', 'value': 100.0})
+                pred_values.append({'timestamp': f'2026-09-28T{hh:02d}:{mm:02d}:00+02:00', 'predicted_value': 130.0})
+                history_values.append({'timestamp': f'2026-09-27T{hh:02d}:{mm:02d}:00+02:00', 'value': 101.0})
+            actual = tmp / 'actual.json'; actual.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': actual_values}))
+            history = tmp / 'history.json'; history.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': history_values}))
+            pred = tmp / 'pred.json'; pred.write_text(json.dumps({'tenant_id': 'tenant-a', 'result': {'series_id': 'meter-a', 'unit': 'kWh', 'forecast_values': pred_values}}))
+            p = run_cli('acceptance-test', '--series-id', 'meter-a', '--predictions', str(pred), '--actuals', str(actual), '--history', str(history), '--acceptance-profile', 'portfolio', '--require-better-than', 'persistence', '--out', str(tmp / 'accept'))
+            self.assertEqual(p.returncode, 50)
+
+    def test_mscons_timezone_and_segment_count_are_validated(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            bad = tmp / 'bad.edi'
+            bad.write_text(SAMPLE_MSCONS.replace("UNT+16+1'", "UNT+99+1'"), encoding='utf-8')
+            out = tmp / 'bad-out'
+            p = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'meter-a', '--input', str(bad), '--out', str(out))
+            self.assertEqual(p.returncode, 1)
+            self.assertIn('UNT segment count mismatch', p.stderr)
+
+            good = tmp / 'good.edi'
+            good.write_text(SAMPLE_MSCONS, encoding='utf-8')
+            out2 = tmp / 'good-out'
+            p2 = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'meter-a', '--input', str(good), '--mscons-timezone', 'Europe/Berlin', '--out', str(out2))
+            self.assertEqual(p2.returncode, 0, p2.stderr)
+            run = json.loads((out2 / 'run.json').read_text())
+            self.assertEqual(run['input_provenance'][0]['timezone'], 'Europe/Berlin')
+
+    def test_idempotency_skips_processed_history_input_and_writes_summary(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                dataset = tmp / 'meter.json'
+                dataset.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.2}]}))
+                ledger = tmp / 'processed.jsonl'
+                out1 = tmp / 'first'
+                p1 = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(dataset), '--processed-ledger', str(ledger), '--idempotency-key', 'auto', '--out', str(out1), env={'CET_API_TOKEN': 'ck_secret'})
+                self.assertEqual(p1.returncode, 0, p1.stderr)
+                out2 = tmp / 'second'
+                p2 = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(dataset), '--processed-ledger', str(ledger), '--idempotency-key', 'auto', '--skip-if-processed', '--out', str(out2), env={'CET_API_TOKEN': 'ck_secret'})
+                self.assertEqual(p2.returncode, 10, p2.stderr)
+                summary = json.loads((out2 / 'summary.json').read_text())
+                self.assertEqual(summary['status'], 'skipped_already_processed')
+                self.assertEqual(len([c for c in api.calls if c[1].endswith('/history')]), 1)
+        finally:
+            api.close()
+
+    def test_predict_can_export_csv_and_dataset_json_with_provenance_redaction(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                model_file = tmp / 'model.json'
+                model_file.write_text(json.dumps({
+                    'tenant_id': 'tenant-a',
+                    'result': {'model_version': 'b' * 64},
+                    'input_provenance': [{'source_format': 'MSCONS', 'document_number': 'DOC20261006001', 'melo_id': 'DE0003966698900000000000052335107', 'obis': '1-0:1.8.0'}],
+                }))
+                out = tmp / 'predict'
+                p = run_cli('predict', '--base-url', api.url, '--series-id', 'meter-a', '--model-file', str(model_file), '--forecast-for', '2026-09-29', '--output-format', 'csv,dataset-json', '--provenance-level', 'pseudonymized', '--out', str(out), env={'CET_API_TOKEN': 'ck_supersecret'})
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertTrue((out / 'forecast.csv').exists())
+                self.assertTrue((out / 'forecast.dataset.json').exists())
+                result = json.loads((out / 'result.json').read_text())
+                self.assertNotIn('DE0003966698900000000000052335107', json.dumps(result))
+                self.assertIn('melo_id_hash', json.dumps(result))
+        finally:
+            api.close()
+
+    def test_batch_history_processes_input_directory_and_structured_logs(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                inbox = tmp / 'inbox'; inbox.mkdir()
+                dataset = {'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.2}]}
+                (inbox / 'one.json').write_text(json.dumps(dataset))
+                out = tmp / 'batch'
+                p = run_cli('batch-history', '--base-url', api.url, '--input-dir', str(inbox), '--glob', '*.json', '--series-id-field', 'series_id', '--log-format', 'json', '--out', str(out), env={'CET_API_TOKEN': 'ck_secret'})
+                self.assertEqual(p.returncode, 0, p.stderr)
+                summary = json.loads((out / 'summary.json').read_text())
+                self.assertEqual(summary['processed'], 1)
+                self.assertEqual(summary['failed'], 0)
+                first_line = p.stdout.strip().splitlines()[0]
+                self.assertEqual(json.loads(first_line)['event'], 'batch_started')
+        finally:
+            api.close()
+
+    def test_config_profile_strategy_and_threshold_exit_codes(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                cfg = tmp / 'config.json'
+                cfg.write_text(json.dumps({'profiles': {'ops': {'base_url': api.url, 'weather_region': 'DE-BY-Kempten-87435'}}}))
+                dataset = tmp / 'meter.json'
+                dataset.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.2}]}))
+                out = tmp / 'train'
+                p = run_cli('train', '--config', str(cfg), '--profile', 'ops', '--series-ids', 'meter-a', '--forecast-for', '2026-09-28', '--strategy', 'evu_operational', '--out', str(out), env={'CET_API_TOKEN': 'ck_secret'})
+                self.assertEqual(p.returncode, 0, p.stderr)
+                train_post = [c for c in api.calls if c[1].endswith('/train')][0][2]
+                self.assertEqual(train_post['strategy'], 'evu_operational')
+                self.assertEqual(train_post['weather_region'], 'DE-BY-Kempten-87435')
+
+                failed = run_cli('train', '--base-url', api.url, '--series-ids', 'error-meter', '--forecast-for', '2026-09-28', '--poll-interval', '0', '--job-timeout', '5', '--out', str(tmp / 'failed-train'), env={'CET_API_TOKEN': 'ck_secret'})
+                self.assertEqual(failed.returncode, 1)
+                self.assertIn('portfolio_failed: missing dependency', failed.stderr)
+
+                pred = tmp / 'pred.json'
+                pred.write_text(json.dumps({'tenant_id': 'tenant-a', 'result': {'series_id': 'meter-a', 'forecast_values': [{'timestamp': '2026-09-28T00:00:00+02:00', 'predicted_value': 10.0}]}}))
+                actual = tmp / 'actual.json'
+                actual.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-28T00:00:00+02:00', 'value': 1.0}]}))
+                score = run_cli('score', '--series-id', 'meter-a', '--predictions', str(pred), '--actuals', str(actual), '--fail-if-wape-above', '10', '--out', str(tmp / 'score'))
+                self.assertEqual(score.returncode, 50)
+        finally:
+            api.close()
+
+    def test_e2e_acceptance_report_compares_baselines_and_quality_gate(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                history = tmp / 'history.json'
+                actuals = tmp / 'actuals.json'
+                history_values = []
+                for day in range(1, 29):
+                    history_values.extend([
+                        {'timestamp': f'2026-08-{day:02d}T00:00:00+02:00', 'value': 9.0 + (day % 3)},
+                        {'timestamp': f'2026-08-{day:02d}T00:15:00+02:00', 'value': 10.0 + (day % 3)},
+                    ])
+                # Baseline source points for forecast_for=2026-09-28.
+                history_values.extend([
+                    {'timestamp': '2026-09-21T00:00:00+02:00', 'value': 9.0},
+                    {'timestamp': '2026-09-21T00:15:00+02:00', 'value': 10.0},
+                    {'timestamp': '2026-09-27T00:00:00+02:00', 'value': 8.0},
+                    {'timestamp': '2026-09-27T00:15:00+02:00', 'value': 9.0},
+                ])
+                history.write_text(json.dumps({
+                    'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin',
+                    'values': history_values,
+                }))
+                actuals.write_text(json.dumps({
+                    'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin',
+                    'values': [
+                        {'timestamp': '2026-09-28T00:00:00+02:00', 'value': 10.0},
+                        {'timestamp': '2026-09-28T00:15:00+02:00', 'value': 12.0},
+                    ]
+                }))
+                out = tmp / 'e2e'
+                p = run_cli(
+                    'e2e', '--base-url', api.url, '--series-id', 'meter-a',
+                    '--history', str(history), '--actuals', str(actuals),
+                    '--forecast-for', '2026-09-28', '--quality-profile', 'system-load',
+                    '--baselines', 'previous-day,previous-week', '--max-wape', '10',
+                    '--baseline-tolerance', '1.0', '--location', 'Berlin',
+                    '--weather-region', 'DE-BE-Berlin', '--min-observed-history-days', '0',
+                    '--out', str(out), env={'CET_API_TOKEN': 'ck_secret'}
+                )
+                self.assertEqual(p.returncode, 0, p.stderr)
+                summary = json.loads((out / 'e2e-summary.json').read_text())
+                self.assertEqual(summary['quality_gate']['status'], 'pass')
+                self.assertEqual(summary['forecast_metrics']['coverage'], 1.0)
+                self.assertLessEqual(summary['forecast_metrics']['wape_percent'], 10)
+                self.assertIn('previous_week', summary['baseline_metrics'])
+                self.assertIn('previous_day', summary['baseline_metrics'])
+                self.assertEqual(summary['leakage_check']['status'], 'ok')
+                self.assertEqual(summary['forecast_context']['location'], 'Berlin')
+                self.assertTrue((out / 'e2e-report.md').exists())
+                self.assertTrue((out / 'quality_gate.json').exists())
+                paths = [c[1] for c in api.calls]
+                self.assertTrue(any(path.endswith('/history') for path in paths))
+                self.assertTrue(any(path.endswith('/train') for path in paths))
+                self.assertTrue(any(path.endswith('/predict') for path in paths))
+        finally:
+            api.close()
+
+    def test_e2e_rejects_insufficient_observed_history_before_api_calls(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                history = tmp / 'history.json'
+                actuals = tmp / 'actuals.json'
+                values = []
+                for day in range(1, 15):
+                    values.append({'timestamp': f'2026-09-{day:02d}T00:00:00+02:00', 'value': 1.0})
+                history.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': values}))
+                actuals.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-10-01T00:00:00+02:00', 'value': 1.0}]}))
+                p = run_cli(
+                    'e2e', '--base-url', api.url, '--series-id', 'meter-a',
+                    '--history', str(history), '--actuals', str(actuals),
+                    '--forecast-for', '2026-10-01', '--out', str(tmp / 'e2e'),
+                    env={'CET_API_TOKEN': 'ck_secret'}
+                )
+                self.assertEqual(p.returncode, 1)
+                self.assertIn('at least 28 observed history days required before D-2', p.stderr)
+                self.assertFalse(api.calls)
+        finally:
+            api.close()
 
 
 if __name__ == '__main__':
