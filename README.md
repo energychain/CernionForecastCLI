@@ -505,6 +505,7 @@ cernion-forecast describe
 - HTTP redirects are refused so credentials are not forwarded to unexpected origins.
 - Token values are not written to `run.json`, `result.json`, `metrics.json` or logs.
 - `--dry-run` validates local input and writes a request plan without API calls.
+- `--debug-http` can log sanitized request/response metadata for diagnostics; tokens are redacted.
 - Tenant access is determined by the server-side token binding, not by a local header claim.
 
 ## Commands

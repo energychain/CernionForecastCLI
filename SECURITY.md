@@ -24,6 +24,8 @@ Do not include API tokens, real customer datasets, real MSCONS payloads, credent
 
 The CLI reads tokens from `CET_API_TOKEN` or `--token-file`. It is designed not to write token values into `run.json`, `result.json`, `metrics.json`, reports or logs.
 
+For token verification, the CLI sends the token to the CET verify endpoint and also uses it in the `Authorization` header. This is expected for CET authentication. The token is redacted from error messages, optional debug HTTP logs and generated artifacts.
+
 Users should still:
 
 - store token files outside the repository,

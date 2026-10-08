@@ -206,7 +206,8 @@ class CLITests(unittest.TestCase):
             self.assertEqual(run['weather_region'], 'DE-BY-Kempten-87435')
             self.assertEqual(run['site_context']['postal_code'], '87435')
             self.assertEqual(run['site_context']['municipality'], 'Kempten')
-            self.assertEqual(run['request']['weather_region'], 'DE-BY-Kempten-87435')
+            self.assertEqual(run['forecast_context']['weather_region'], 'DE-BY-Kempten-87435')
+            self.assertNotIn('request', run)
 
 
     def test_mscons_history_dry_run_preserves_envelope_provenance(self):
@@ -242,7 +243,7 @@ class CLITests(unittest.TestCase):
                 p = run_cli(
                     'history', '--base-url', api.url, '--tenant-id', 'tenant-a',
                     '--series-id', 'DE0003966698900000000000052335107',
-                    '--input', str(mscons), '--out', str(out), env={'CET_API_TOKEN': 'ck_secret'}
+                    '--input', str(mscons), '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890'}
                 )
                 self.assertEqual(p.returncode, 0, p.stderr)
                 history_post = [c for c in api.calls if c[1].endswith('/history')][0][2]
@@ -266,7 +267,7 @@ class CLITests(unittest.TestCase):
                 dataset = tmp / 'meter.json'
                 dataset.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.2}]}))
                 out = tmp / 'enroll'
-                secret = 'ck_supersecret'
+                secret = 'ck_12345678901234567890abcdef'
                 p = run_cli('enroll', '--base-url', api.url, '--tenant-id', 'tenant-a', '--series-id', 'meter-a', '--input', str(dataset), '--forecast-for', '2026-09-28', '--out', str(out), env={'CET_API_TOKEN': secret})
                 self.assertEqual(p.returncode, 0, p.stderr)
                 combined = p.stdout + p.stderr + (out / 'run.json').read_text() + (out / 'result.json').read_text()
@@ -288,7 +289,7 @@ class CLITests(unittest.TestCase):
                 mscons = tmp / 'meter.edi'
                 mscons.write_text(SAMPLE_MSCONS)
                 out = tmp / 'mscons-history'
-                p = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(mscons), '--out', str(out), env={'CET_API_TOKEN': 'ck_supersecret'})
+                p = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(mscons), '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890abcdef'})
                 self.assertEqual(p.returncode, 0, p.stderr)
                 post = [c for c in api.calls if c[1].endswith('/history')][0]
                 dataset = post[2]['dataset']
@@ -317,7 +318,7 @@ class CLITests(unittest.TestCase):
                     'input_provenance': [{'source_format': 'MSCONS', 'document_number': 'DOC20261006001', 'melo_id': 'DE0003966698900000000000052335107', 'obis': '1-0:1.8.0'}],
                 }))
                 out = tmp / 'predict'
-                p = run_cli('predict', '--base-url', api.url, '--series-id', 'meter-a', '--model-file', str(model_file), '--forecast-for', '2026-09-29', '--out', str(out), env={'CET_API_TOKEN': 'ck_supersecret'})
+                p = run_cli('predict', '--base-url', api.url, '--series-id', 'meter-a', '--model-file', str(model_file), '--forecast-for', '2026-09-29', '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890abcdef'})
                 self.assertEqual(p.returncode, 0, p.stderr)
                 result = json.loads((out / 'result.json').read_text())
                 self.assertEqual(result['result']['input_provenance'][0]['document_number'], 'DOC20261006001')
@@ -379,7 +380,7 @@ class CLITests(unittest.TestCase):
             p = run_cli('acceptance-test', '--series-id', 'meter-a', '--predictions', str(pred), '--actuals', str(actual), '--history', str(history), '--acceptance-profile', 'portfolio', '--require-better-than', 'persistence', '--out', str(tmp / 'accept'))
             self.assertEqual(p.returncode, 50)
 
-    def test_mscons_timezone_and_segment_count_are_validated(self):
+    def test_mscons_timezone_segment_count_and_trailing_escape_are_validated(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             bad = tmp / 'bad.edi'
@@ -388,6 +389,12 @@ class CLITests(unittest.TestCase):
             p = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'meter-a', '--input', str(bad), '--out', str(out))
             self.assertEqual(p.returncode, 1)
             self.assertIn('UNT segment count mismatch', p.stderr)
+
+            malformed = tmp / 'malformed.edi'
+            malformed.write_text(SAMPLE_MSCONS + '?', encoding='utf-8')
+            p_bad_escape = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'meter-a', '--input', str(malformed), '--out', str(tmp / 'bad-escape-out'))
+            self.assertEqual(p_bad_escape.returncode, 1)
+            self.assertIn('Malformed EDIFACT escape sequence', p_bad_escape.stderr)
 
             good = tmp / 'good.edi'
             good.write_text(SAMPLE_MSCONS, encoding='utf-8')
@@ -406,10 +413,10 @@ class CLITests(unittest.TestCase):
                 dataset.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.2}]}))
                 ledger = tmp / 'processed.jsonl'
                 out1 = tmp / 'first'
-                p1 = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(dataset), '--processed-ledger', str(ledger), '--idempotency-key', 'auto', '--out', str(out1), env={'CET_API_TOKEN': 'ck_secret'})
+                p1 = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(dataset), '--processed-ledger', str(ledger), '--idempotency-key', 'auto', '--out', str(out1), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
                 self.assertEqual(p1.returncode, 0, p1.stderr)
                 out2 = tmp / 'second'
-                p2 = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(dataset), '--processed-ledger', str(ledger), '--idempotency-key', 'auto', '--skip-if-processed', '--out', str(out2), env={'CET_API_TOKEN': 'ck_secret'})
+                p2 = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(dataset), '--processed-ledger', str(ledger), '--idempotency-key', 'auto', '--skip-if-processed', '--out', str(out2), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
                 self.assertEqual(p2.returncode, 10, p2.stderr)
                 summary = json.loads((out2 / 'summary.json').read_text())
                 self.assertEqual(summary['status'], 'skipped_already_processed')
@@ -429,7 +436,7 @@ class CLITests(unittest.TestCase):
                     'input_provenance': [{'source_format': 'MSCONS', 'document_number': 'DOC20261006001', 'melo_id': 'DE0003966698900000000000052335107', 'obis': '1-0:1.8.0'}],
                 }))
                 out = tmp / 'predict'
-                p = run_cli('predict', '--base-url', api.url, '--series-id', 'meter-a', '--model-file', str(model_file), '--forecast-for', '2026-09-29', '--output-format', 'csv,dataset-json', '--provenance-level', 'pseudonymized', '--out', str(out), env={'CET_API_TOKEN': 'ck_supersecret'})
+                p = run_cli('predict', '--base-url', api.url, '--series-id', 'meter-a', '--model-file', str(model_file), '--forecast-for', '2026-09-29', '--output-format', 'csv,dataset-json', '--provenance-level', 'pseudonymized', '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890abcdef'})
                 self.assertEqual(p.returncode, 0, p.stderr)
                 self.assertTrue((out / 'forecast.csv').exists())
                 self.assertTrue((out / 'forecast.dataset.json').exists())
@@ -448,7 +455,7 @@ class CLITests(unittest.TestCase):
                 dataset = {'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.2}]}
                 (inbox / 'one.json').write_text(json.dumps(dataset))
                 out = tmp / 'batch'
-                p = run_cli('batch-history', '--base-url', api.url, '--input-dir', str(inbox), '--glob', '*.json', '--series-id-field', 'series_id', '--log-format', 'json', '--out', str(out), env={'CET_API_TOKEN': 'ck_secret'})
+                p = run_cli('batch-history', '--base-url', api.url, '--input-dir', str(inbox), '--glob', '*.json', '--series-id-field', 'series_id', '--log-format', 'json', '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
                 self.assertEqual(p.returncode, 0, p.stderr)
                 summary = json.loads((out / 'summary.json').read_text())
                 self.assertEqual(summary['processed'], 1)
@@ -464,19 +471,24 @@ class CLITests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as td:
                 tmp = Path(td)
                 cfg = tmp / 'config.json'
-                cfg.write_text(json.dumps({'profiles': {'ops': {'base_url': api.url, 'weather_region': 'DE-BY-Kempten-87435'}}}))
+                cfg.write_text(json.dumps({'profiles': {'ops': {'base_url': api.url, 'weather_region': 'DE-BY-Kempten-87435', 'quiet': True, 'debug_http': True}}}))
                 dataset = tmp / 'meter.json'
                 dataset.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.2}]}))
                 out = tmp / 'train'
-                p = run_cli('train', '--config', str(cfg), '--profile', 'ops', '--series-ids', 'meter-a', '--forecast-for', '2026-09-28', '--strategy', 'evu_operational', '--out', str(out), env={'CET_API_TOKEN': 'ck_secret'})
+                p = run_cli('train', '--config', str(cfg), '--profile', 'ops', '--series-ids', 'meter-a', '--forecast-for', '2026-09-28', '--strategy', 'evu_operational', '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
                 self.assertEqual(p.returncode, 0, p.stderr)
                 train_post = [c for c in api.calls if c[1].endswith('/train')][0][2]
                 self.assertEqual(train_post['strategy'], 'evu_operational')
                 self.assertEqual(train_post['weather_region'], 'DE-BY-Kempten-87435')
 
-                failed = run_cli('train', '--base-url', api.url, '--series-ids', 'error-meter', '--forecast-for', '2026-09-28', '--poll-interval', '0', '--job-timeout', '5', '--out', str(tmp / 'failed-train'), env={'CET_API_TOKEN': 'ck_secret'})
+                failed = run_cli('train', '--base-url', api.url, '--series-ids', 'error-meter', '--forecast-for', '2026-09-28', '--poll-interval', '0', '--job-timeout', '5', '--out', str(tmp / 'failed-train'), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
                 self.assertEqual(failed.returncode, 1)
                 self.assertIn('portfolio_failed: missing dependency', failed.stderr)
+
+                debug = run_cli('train', '--base-url', api.url, '--series-ids', 'meter-a', '--forecast-for', '2026-09-28', '--poll-interval', '0', '--job-timeout', '5', '--debug-http', '--verbose', '--out', str(tmp / 'debug-train'), env={'CET_API_TOKEN': 'ck_abcdefghijklmnopqrstuvwxyz123456'})
+                self.assertEqual(debug.returncode, 0, debug.stderr)
+                self.assertIn('request_payload', debug.stderr)
+                self.assertNotIn('ck_abcdefghijklmnopqrstuvwxyz123456', debug.stderr)
 
                 pred = tmp / 'pred.json'
                 pred.write_text(json.dumps({'tenant_id': 'tenant-a', 'result': {'series_id': 'meter-a', 'forecast_values': [{'timestamp': '2026-09-28T00:00:00+02:00', 'predicted_value': 10.0}]}}))
@@ -486,6 +498,19 @@ class CLITests(unittest.TestCase):
                 self.assertEqual(score.returncode, 50)
         finally:
             api.close()
+
+    def test_config_profile_can_set_explicit_boolean_flags(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            cfg = tmp / 'config.json'
+            cfg.write_text(json.dumps({'profiles': {'ops': {'quiet': True, 'resume_out': True, 'debug_http': True}}}))
+            sys.path.insert(0, str(ROOT / 'src'))
+            from cernion_forecast_cli.cli import apply_config, build_parser
+            args = build_parser().parse_args(['doctor', '--config', str(cfg), '--profile', 'ops', '--out', str(tmp / 'doctor')])
+            configured = apply_config(args)
+            self.assertTrue(configured.quiet)
+            self.assertTrue(configured.resume_out)
+            self.assertTrue(configured.debug_http)
 
     def test_e2e_acceptance_report_compares_baselines_and_quality_gate(self):
         api = FakeAPI()
@@ -526,7 +551,7 @@ class CLITests(unittest.TestCase):
                     '--baselines', 'previous-day,previous-week', '--max-wape', '10',
                     '--baseline-tolerance', '1.0', '--location', 'Berlin',
                     '--weather-region', 'DE-BE-Berlin', '--min-observed-history-days', '0',
-                    '--out', str(out), env={'CET_API_TOKEN': 'ck_secret'}
+                    '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890'}
                 )
                 self.assertEqual(p.returncode, 0, p.stderr)
                 summary = json.loads((out / 'e2e-summary.json').read_text())
@@ -562,13 +587,58 @@ class CLITests(unittest.TestCase):
                     'e2e', '--base-url', api.url, '--series-id', 'meter-a',
                     '--history', str(history), '--actuals', str(actuals),
                     '--forecast-for', '2026-10-01', '--out', str(tmp / 'e2e'),
-                    env={'CET_API_TOKEN': 'ck_secret'}
+                    env={'CET_API_TOKEN': 'ck_12345678901234567890'}
                 )
                 self.assertEqual(p.returncode, 1)
                 self.assertIn('at least 28 observed history days required before D-2', p.stderr)
                 self.assertFalse(api.calls)
         finally:
             api.close()
+
+    def test_mscons_rejects_files_above_configured_size(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            mscons = tmp / 'too-large.mscons'
+            mscons.write_text(SAMPLE_MSCONS, encoding='utf-8')
+            p = run_cli(
+                'history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'meter-a',
+                '--input', str(mscons), '--out', str(tmp / 'out'),
+                env={'CERNION_FORECAST_MSCONS_MAX_BYTES': '10'}
+            )
+            self.assertEqual(p.returncode, 1)
+            self.assertIn('exceeds maximum size', p.stderr)
+
+    def test_mscons_requires_filter_for_multiple_candidate_series(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            mscons = tmp / 'multi.mscons'
+            second = SAMPLE_MSCONS.replace("LOC+172+DE0003966698900000000000052335107'", "LOC+172+DE0003966698900000000000099999999'").replace("UNH+1", "UNH+2").replace("UNT+16+1", "UNT+16+2")
+            mscons.write_text(SAMPLE_MSCONS + second, encoding='utf-8')
+            p = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--input', str(mscons), '--out', str(tmp / 'out'))
+            self.assertEqual(p.returncode, 1)
+            self.assertIn('multiple candidate time series', p.stderr)
+
+    def test_predict_csv_export_escapes_formula_like_cells(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            sys.path.insert(0, str(ROOT / 'src'))
+            from cernion_forecast_cli.cli import write_forecast_csv
+            out = tmp / 'forecast.csv'
+            write_forecast_csv(out, {'forecast_values': [{'timestamp': '=2026-09-28T00:00:00+02:00', 'predicted_value': '+10.5'}]})
+            csv_text = out.read_text()
+            self.assertIn("'=2026-09-28T00:00:00+02:00", csv_text)
+            self.assertIn("'+10.5", csv_text)
+
+    def test_batch_history_rejects_glob_that_escapes_input_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            inbox = tmp / 'inbox'
+            inbox.mkdir()
+            outside = tmp / 'outside.json'
+            outside.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.0}]}))
+            p = run_cli('batch-history', '--input-dir', str(inbox), '--glob', '../outside.json', '--base-url', 'http://127.0.0.1:1', '--out', str(tmp / 'batch'), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
+            self.assertEqual(p.returncode, 1)
+            self.assertIn('escapes input directory', p.stderr)
 
 
 if __name__ == '__main__':

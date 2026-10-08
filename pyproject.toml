@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cernion-forecast-cli"
-version = "0.2.0"
+version = "0.2.1"
 description = "Value-added CLI integration layer for Cernion Energy Tools forecast capabilities"
 readme = "README.md"
 requires-python = ">=3.10"

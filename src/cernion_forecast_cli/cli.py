@@ -22,29 +22,34 @@ from zoneinfo import ZoneInfo
 ROOT = '/api/forecast-sandbox/consumption/portfolio'
 SANDBOX = '/api/forecast-sandbox/consumption'
 UTC = dt.timezone.utc
-CLI_VERSION = '0.2.0'
+CLI_VERSION = '0.2.1'
 ARTIFACT_SCHEMA = 'cernion.forecast-cli.artifact.v1'
 MSCONS_SUFFIXES = {'.mscons', '.edi', '.edifact'}
+MSCONS_MAX_BYTES = int(os.environ.get('CERNION_FORECAST_MSCONS_MAX_BYTES', str(50 * 1024 * 1024)))
 CCI_TO_OBIS = {'Z06': '1-0:1.8.0', 'Z07': '1-0:2.8.0', 'Z10': '1-0:1.29.0', 'Z11': '1-0:2.29.0'}
 STATUS_TO_QUALITY = {'67': 'measured', '79': 'estimated', '68': 'provisional', '220': 'corrected'}
 LOG = logging.getLogger('cernion_forecast_cli')
 
 
-def read_json(path: Path):
+def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding='utf-8'))
 
 
-def save_json(path: Path, value):
+def chmod_private(path: Path) -> None:
+    try:
+        os.chmod(path, 0o600)
+    except OSError as error:
+        raise PermissionError(f'Could not restrict permissions on {path}') from error
+
+
+def save_json(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     value = add_artifact_meta(value, path.stem) if isinstance(value, dict) else value
     tmp = path.with_suffix(path.suffix + '.tmp')
     with tmp.open('w', encoding='utf-8') as f:
-        try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            pass
         json.dump(value, f, indent=2, ensure_ascii=False, allow_nan=False)
         f.write('\n')
+    chmod_private(tmp)
     tmp.replace(path)
 
 
@@ -87,6 +92,12 @@ def finite_number(value) -> float:
     return float(value)
 
 
+def csv_safe(value):
+    if isinstance(value, str) and value[:1] in ('=', '+', '-', '@'):
+        return "'" + value
+    return value
+
+
 def configure_logging(args):
     level = logging.WARNING
     if getattr(args, 'verbose', False):
@@ -110,7 +121,8 @@ def log_event(args, event, **fields):
     LOG.info(text)
 
 
-def load_history_values(path: Path):
+def load_history_values(path: Path | str):
+    path = Path(path)
     data = read_json(path)
     values = data.get('historicalValues') or data.get('values')
     if not isinstance(values, list) or not values:
@@ -178,6 +190,8 @@ def split_escaped(text: str, delimiter: str, release: str = '?'):
             parts.append(current); current = ''
         else:
             current += char
+    if escaped:
+        raise ValueError('Malformed EDIFACT escape sequence: trailing release character')
     parts.append(current)
     return parts
 
@@ -185,6 +199,8 @@ def split_escaped(text: str, delimiter: str, release: str = '?'):
 def tokenize_edifact(raw: str):
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError('EDIFACT input is empty')
+    if len(raw.encode('utf-8', errors='surrogatepass')) > MSCONS_MAX_BYTES:
+        raise ValueError(f'EDIFACT input exceeds maximum size of {MSCONS_MAX_BYTES} bytes')
     separators = {'element': '+', 'component': ':', 'segment': "'", 'release': '?'}
     body = raw.replace('\r', '').replace('\n', '')
     una = None
@@ -351,6 +367,8 @@ def select_mscons_series(parsed, *, series_id=None, melo_id=None, obis=None, cci
 
 
 def dataset_from_mscons(path: Path, series_id: str | None = None, *, melo_id=None, obis=None, cci_code=None, message_ref=None, document_number=None, mscons_timezone='UTC'):
+    if path.stat().st_size > MSCONS_MAX_BYTES:
+        raise ValueError(f'MSCONS file exceeds maximum size of {MSCONS_MAX_BYTES} bytes')
     parsed = parse_mscons(path.read_text(encoding='utf-8-sig'), timezone=mscons_timezone)
     message, location, timeseries, raw_values = select_mscons_series(parsed, series_id=series_id, melo_id=melo_id, obis=obis, cci_code=cci_code, message_ref=message_ref, document_number=document_number)
     values, units = [], set()
@@ -410,7 +428,8 @@ def source_provenance(items):
                                      'obisEquivalent': last.get('obis'), 'parseWarnings': last.get('parse_warnings') or []}}
 
 
-def load_dataset(path: Path, series_id: str | None = None, unit: str | None = None, timezone: str | None = None, args=None):
+def load_dataset(path: Path | str, series_id: str | None = None, unit: str | None = None, timezone: str | None = None, args=None):
+    path = Path(path)
     suffix = path.suffix.lower()
     mscons_audit = None
     if suffix == '.json':
@@ -526,7 +545,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Client:
-    def __init__(self, base_url: str, token: str | None = None, tenant_header: str | None = None, timeout: float = 120):
+    def __init__(self, base_url: str, token: str | None = None, tenant_header: str | None = None, timeout: float = 120, debug_http: bool = False):
         self.base = base_url.rstrip('/')
         split = urllib.parse.urlsplit(self.base)
         if split.scheme not in ('http', 'https') or not split.netloc or split.username or split.password or split.query or split.fragment:
@@ -534,7 +553,17 @@ class Client:
         self.token = token or ''
         self.tenant_header = tenant_header
         self.timeout = timeout
+        self.debug_http = bool(debug_http)
         self.opener = urllib.request.build_opener(NoRedirect())
+
+    def scrub(self, value):
+        if isinstance(value, str):
+            return value.replace(self.token, '[REDACTED]') if self.token else value
+        if isinstance(value, list):
+            return [self.scrub(item) for item in value]
+        if isinstance(value, dict):
+            return {key: ('[REDACTED]' if key.lower() in ('authorization', 'token') else self.scrub(item)) for key, item in value.items()}
+        return value
 
     def call(self, route: str, payload=None, *, idempotency_key=None, method=None):
         headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
@@ -545,25 +574,42 @@ class Client:
         if idempotency_key:
             headers['Idempotency-Key'] = idempotency_key
         data = None if payload is None else json.dumps(payload, allow_nan=False).encode()
+        request_method = method or ('POST' if payload is not None else 'GET')
         req = urllib.request.Request(self.base + route, data=data, headers=headers, method=method)
         started = time.monotonic()
-        try:
-            with self.opener.open(req, timeout=self.timeout) as response:
-                text = response.read().decode('utf-8')
+        attempts = 3 if request_method == 'GET' else 1
+        last_transport_error = None
+        for attempt in range(attempts):
+            try:
+                with self.opener.open(req, timeout=self.timeout) as response:
+                    text = response.read().decode('utf-8')
+                    if self.token:
+                        text = text.replace(self.token, '[REDACTED]')
+                    event = {'event': 'http_call', 'route': route, 'status': response.status, 'duration_ms': round((time.monotonic() - started) * 1000)}
+                    if self.debug_http:
+                        event['method'] = request_method
+                        event['request_payload'] = self.scrub(payload)
+                        event['response_headers'] = {key: value for key, value in response.headers.items() if key.lower() in ('content-type', 'request-id', 'x-request-id')}
+                    LOG.info(json.dumps(event, ensure_ascii=False))
+                    return json.loads(text) if text else {}
+            except urllib.error.HTTPError as error:
+                text = error.read().decode(errors='replace')
                 if self.token:
                     text = text.replace(self.token, '[REDACTED]')
-                LOG.info(json.dumps({'event': 'http_call', 'route': route, 'status': response.status, 'duration_ms': round((time.monotonic() - started) * 1000)}))
-                return json.loads(text) if text else {}
-        except urllib.error.HTTPError as error:
-            text = error.read().decode(errors='replace')
-            if self.token:
-                text = text.replace(self.token, '[REDACTED]')
-            raise ValueError(f'HTTP {error.code}: {text}') from None
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
-            raise ConnectionError('API transport interrupted; writes are not automatically repeated') from error
+                if request_method == 'GET' and error.code in (429, 500, 502, 503, 504) and attempt + 1 < attempts:
+                    time.sleep(min(2 ** attempt, 5))
+                    continue
+                raise ValueError(f'HTTP {error.code}: {text}') from None
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+                last_transport_error = error
+                if request_method == 'GET' and attempt + 1 < attempts:
+                    time.sleep(min(2 ** attempt, 5))
+                    continue
+                break
+        raise ConnectionError('API transport interrupted; writes are not automatically repeated') from last_transport_error
 
     def verify(self):
-        if not re.fullmatch(r'(?:ck_|csess_)[A-Za-z0-9_.-]+', self.token or ''):
+        if not re.fullmatch(r'(?:ck_|csess_)[A-Za-z0-9_.-]{20,256}', self.token or ''):
             raise ValueError('Provide CET_API_TOKEN or --token-file; tokens are never stored')
         route = '/api/tokens/verify' if self.token.startswith('ck_') else '/api/auth/verify'
         result = self.call(route, {'token': self.token, 'trackUsage': False})
@@ -593,7 +639,15 @@ def token_from(args):
 
 
 def client_for(args):
-    return Client(args.base_url, token_from(args), None, args.timeout)
+    return Client(args.base_url, token_from(args), None, args.timeout, getattr(args, 'debug_http', False))
+
+
+def resolved_child_path(root: Path, child: Path) -> Path:
+    root_resolved = root.resolve()
+    child_resolved = child.resolve()
+    if child_resolved != root_resolved and root_resolved not in child_resolved.parents:
+        raise ValueError(f'Batch input path escapes input directory: {child}')
+    return child
 
 
 def client_run_id(operation, payload) -> str:
@@ -634,7 +688,16 @@ def write_forecast_csv(path: Path, result):
         writer = csv.DictWriter(f, fieldnames=['timestamp', 'predicted_value'])
         writer.writeheader()
         for row in rows:
-            writer.writerow({'timestamp': row.get('timestamp') or row.get('ts'), 'predicted_value': row.get('predicted_value') if 'predicted_value' in row else row.get('value')})
+            writer.writerow({'timestamp': csv_safe(row.get('timestamp') or row.get('ts')), 'predicted_value': csv_safe(row.get('predicted_value') if 'predicted_value' in row else row.get('value'))})
+
+
+def write_residuals_csv(path: Path, residuals):
+    fieldnames = ['timestamp', 'actual', 'predicted', 'error', 'absolute_error', 'percentage_error']
+    with path.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in residuals:
+            writer.writerow({field: csv_safe(row.get(field)) for field in fieldnames})
 
 
 def output_formats(args):
@@ -727,14 +790,17 @@ def cmd_history_like(args, train_after=False):
         state['forecast_context'] = context
         if context.get('site_context'): state['site_context'] = context['site_context']
         if context.get('weather_region'): state['weather_region'] = context['weather_region']
-    request = {'series_ids': [dataset['series_id']], 'strategy': 'shared_baseline', 'forecast_for': str(args.forecast_for)} if train_after else {}
-    if context:
-        request['forecast_context'] = context
-        if context.get('site_context'): request['site_context'] = context['site_context']
-        if context.get('weather_region'): request['weather_region'] = context['weather_region']
-    if getattr(args, 'import_mode', None):
-        request['import_mode'] = args.import_mode
-    state['request'] = request
+    if train_after:
+        request = {'series_ids': [dataset['series_id']], 'strategy': 'shared_baseline', 'forecast_for': str(args.forecast_for)}
+        if context:
+            request['forecast_context'] = context
+            if context.get('site_context'): request['site_context'] = context['site_context']
+            if context.get('weather_region'): request['weather_region'] = context['weather_region']
+        if getattr(args, 'import_mode', None):
+            request['import_mode'] = args.import_mode
+        state['request'] = request
+    else:
+        request = None
     history_payload = {'dataset': dataset, 'historical_import': args.historical_import or train_after, 'allow_corrections': args.allow_corrections,
                        'import_mode': getattr(args, 'import_mode', 'append-only')}
     history_idem = client_run_id('history', {'audit': audit, 'payload': history_payload}) if getattr(args, 'idempotency_key', None) in (None, 'auto') else args.idempotency_key
@@ -764,6 +830,7 @@ def cmd_history_like(args, train_after=False):
         ledger_append(getattr(args, 'processed_ledger', None), history_idem, {'status': 'completed', 'series_id': dataset['series_id']})
         print('History stored: ' + str(args.out / 'result.json'))
         return
+    assert request is not None
     train_idem = client_run_id('train', request)
     request['clientRunId'] = train_idem
     state['status'] = 'job_submission_pending'; state['train_client_run_id'] = train_idem; save_json(args.out / 'run.json', state)
@@ -930,9 +997,7 @@ def cmd_score(args):
     metrics = {'tenant_id': tenant, 'series_id': args.series_id, 'unit': actual['unit'], **metrics, 'actual_source': audit}
     save_json(args.out / 'metrics.json', metrics)
     save_json(args.out / 'residuals.json', {'series_id': args.series_id, 'rows': residuals})
-    with (args.out / 'residuals.csv').open('w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=['timestamp', 'actual', 'predicted', 'error', 'absolute_error', 'percentage_error'])
-        writer.writeheader(); writer.writerows(residuals)
+    write_residuals_csv(args.out / 'residuals.csv', residuals)
     wape = 'undefined' if metrics['wape_percent'] is None else f"{metrics['wape_percent']:.4f} %"
     report = f"# Forecast quality — {args.series_id}\n\nTenant: {tenant or 'n/a'}. Unit: {actual['unit']}.\n\nN: {metrics['sample_count']}\nCoverage: {metrics['coverage']:.2%}\nRMSE: {metrics['rmse']:.6f}\nMAE: {metrics['mae']:.6f}\nWAPE: {wape}\n"
     (args.out / 'report.md').write_text(report, encoding='utf-8')
@@ -1055,9 +1120,7 @@ def cmd_acceptance_test(args):
     }
     save_json(args.out / 'acceptance_report.json', report)
     save_json(args.out / 'residuals.json', {'series_id': args.series_id, 'rows': residuals})
-    with (args.out / 'residuals.csv').open('w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=['timestamp', 'actual', 'predicted', 'error', 'absolute_error', 'percentage_error'])
-        writer.writeheader(); writer.writerows(residuals)
+    write_residuals_csv(args.out / 'residuals.csv', residuals)
     lines = [f"# Forecast acceptance — {args.series_id}", '', f"Status: {status}", f"Profile: {args.acceptance_profile}", f"Model WAPE: {model_metrics['wape_percent']:.4f}%", f"Model bias: {model_metrics['bias_percent']:.4f}%", '']
     for name, bm in benchmarks.items():
         if bm.get('status') == 'ok':
@@ -1223,9 +1286,7 @@ def cmd_e2e(args):
     save_json(args.out / 'quality_gate.json', gate)
     save_json(args.out / 'e2e-summary.json', summary)
     save_json(args.out / 'residuals.json', {'series_id': history['series_id'], 'rows': residuals})
-    with (args.out / 'residuals.csv').open('w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=['timestamp', 'actual', 'predicted', 'error', 'absolute_error', 'percentage_error'])
-        writer.writeheader(); writer.writerows(residuals)
+    write_residuals_csv(args.out / 'residuals.csv', residuals)
     lines = [f"# Forecast E2E acceptance — {history['series_id']}", '', f"Status: {gate['status']}", f"Profile: {args.quality_profile}", f"Forecast WAPE: {forecast_metrics['wape_percent']:.4f}%", f"Coverage: {forecast_metrics['coverage']:.2%}", f"Leakage check: {leak['status']}", '']
     for name, bm in baseline_metrics.items():
         if bm.get('status') == 'ok':
@@ -1274,7 +1335,8 @@ def cmd_doctor(args):
 
 def cmd_batch_history(args):
     fresh_out(args.out, getattr(args, 'resume_out', False))
-    files = sorted(args.input_dir.glob(args.glob))
+    input_root = args.input_dir.resolve()
+    files = sorted(resolved_child_path(input_root, file) for file in args.input_dir.glob(args.glob))
     if args.log_format == 'json':
         print(json.dumps({'event': 'batch_started', 'files': len(files)}, ensure_ascii=False))
     processed = failed = 0
@@ -1285,10 +1347,22 @@ def cmd_batch_history(args):
             sid = payload.get(args.series_id_field) if isinstance(payload, dict) else None
             sid = sid or getattr(args, 'series_id', None) or file.stem
             item_out = args.out / file.stem
-            argv = ['history', '--base-url', args.base_url, '--series-id', sid, '--input', str(file), '--out', str(item_out), '--quality-policy', args.quality_policy, '--min-coverage', str(args.min_coverage)]
-            token = token_from(args)
-            env_token = token or os.environ.get('CET_API_TOKEN', '')
-            rc = main(argv)
+            child = argparse.Namespace(**vars(args))
+            child.input = file
+            child.series_id = sid
+            child.out = item_out
+            child.output_format = 'json'
+            child.stdout_json = False
+            child.unit = getattr(args, 'unit', None)
+            child.timezone = getattr(args, 'timezone', None)
+            child.allow_corrections = False
+            child.historical_import = False
+            child.import_mode = 'append-only'
+            child.processed_ledger = None
+            child.idempotency_key = None
+            child.skip_if_processed = False
+            rc = cmd_history_like(child, train_after=False)
+            rc = rc if isinstance(rc, int) else 0
             if rc == 0:
                 processed += 1; status = 'ok'
             else:
@@ -1333,7 +1407,7 @@ def cmd_describe(args):
 
 
 def add_common(sub, token=True):
-    sub.add_argument('--base-url', default='https://api.cernion.de')
+    sub.add_argument('--base-url', default=os.environ.get('CET_API_BASE_URL', 'https://api.cernion.de'))
     sub.add_argument('--timeout', type=float, default=120)
     sub.add_argument('--config', type=Path)
     sub.add_argument('--profile')
@@ -1342,6 +1416,7 @@ def add_common(sub, token=True):
     sub.add_argument('--verbose', action='store_true')
     sub.add_argument('--quiet', action='store_true')
     sub.add_argument('--resume-out', action='store_true')
+    sub.add_argument('--debug-http', action='store_true', help='Log sanitized request/response metadata for HTTP diagnostics')
     if token:
         sub.add_argument('--token-file', type=Path)
         sub.add_argument('--poll-interval', type=float, default=5)
@@ -1398,7 +1473,7 @@ def build_parser():
 
     for name in ('history', 'enroll'):
         sp = sub.add_parser(name); add_common(sp); add_output_args(sp); add_quality_args(sp); add_mscons_select_args(sp); add_context_args(sp)
-        sp.add_argument('--input', type=Path, required=True); sp.add_argument('--series-id', required=True); sp.add_argument('--unit', choices=['kWh', 'kW']); sp.add_argument('--timezone')
+        sp.add_argument('--input', type=Path, required=True); sp.add_argument('--series-id'); sp.add_argument('--unit', choices=['kWh', 'kW']); sp.add_argument('--timezone')
         sp.add_argument('--allow-corrections', action='store_true'); sp.add_argument('--historical-import', action='store_true'); sp.add_argument('--import-mode', choices=['append-only', 'correction', 'replace-period'], default='append-only')
         sp.add_argument('--processed-ledger', type=Path); sp.add_argument('--idempotency-key'); sp.add_argument('--skip-if-processed', action='store_true')
         if name == 'enroll':
@@ -1460,7 +1535,9 @@ def apply_config(args):
         attr = key.replace('-', '_')
         if hasattr(args, attr):
             current = getattr(args, attr)
-            if current in (None, False) or (attr == 'base_url' and current == 'https://api.cernion.de'):
+            if isinstance(value, bool):
+                setattr(args, attr, value)
+            elif current in (None, False) or (attr == 'base_url' and current == 'https://api.cernion.de'):
                 setattr(args, attr, value)
     return args
 

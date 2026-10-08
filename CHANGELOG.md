@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The project follows semantic-versioning intent. Before `1.0.0`, command names and core artifact names are intended to be stable, but JSON artifact details may still evolve when necessary.
 
+## [0.2.1] - 2026-10-09
+
+### Hardened
+
+- Config profiles can now set explicit boolean flags such as `quiet`, `resume_out` and `debug_http`.
+- History-only runs no longer carry an unused training request object in `run.json`; context stays in `forecast_context`/`site_context`.
+- `batch-history` calls the history command implementation directly instead of recursively invoking the top-level CLI parser for every file.
+- MSCONS/EDIFACT parsing now rejects malformed trailing release characters instead of silently dropping them.
+- Optional `--debug-http` logging emits sanitized HTTP diagnostics without exposing tokens.
+
+### Documentation
+
+- Security notes now clarify that token verification sends the token to the verify endpoint while still redacting it from logs and artifacts.
+
 ## [0.2.0] - 2026-10-09
 
 ### Added
