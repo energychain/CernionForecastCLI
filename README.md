@@ -492,6 +492,10 @@ cernion-forecast describe
 
 ## Data contract
 
+The project now carries a formal domain contract: [Cernion Forecast — Verbindlicher fachlicher Datenintegritätsvertrag](docs/data-integrity-contract.md), document ID `CET-FC-DIC-001`, version `0.1.0 — Entwurf`, status `Proposed / Nicht freigegeben`.
+
+For CernionForecastCLI development this document is the binding fachliche reference for identity, timestamp, MSCONS selection, D-2 information cutoff, forecast-horizon validation, baseline integrity, Evidence Receipts, error semantics and acceptance tests. Because the document is explicitly **not yet approved**, code may only claim partial conformance to implemented and tested rules; it must not present the contract as fully released until the open approvals in section 14 are resolved.
+
 - Granularity: quarter-hour values.
 - Units: `kWh` interval energy or `kW` average power.
 - Timestamps require explicit offset and PT15M grid.
@@ -538,7 +542,7 @@ A live smoke against the public sandbox can be run without a token. Tenant-bound
 - See `SECURITY.md` for private vulnerability reporting guidance.
 - See `SUPPORT.md` for public support boundaries and safe live-API issue data.
 - See `CHANGELOG.md` for release notes.
-- See `docs/input-formats.md`, `docs/e2e-acceptance.md`, `docs/troubleshooting.md` and `docs/release.md` for focused operator and maintainer documentation.
+- See `docs/data-integrity-contract.md`, `docs/input-formats.md`, `docs/e2e-acceptance.md`, `docs/troubleshooting.md` and `docs/release.md` for focused operator and maintainer documentation.
 - Issues and pull requests should use the templates under `.github/`.
 - Do not post API tokens, real customer data, private MSCONS/EDIFACT payloads or non-public market communication content in issues or PRs.
 
