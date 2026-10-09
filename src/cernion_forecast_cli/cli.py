@@ -1061,7 +1061,7 @@ def prediction_rows(result):
         yield parse_stamp(ts), finite_number(val)
 
 
-def metric_summary(pairs, *, expected_intervals=None):
+def metric_summary(pairs, *, expected_intervals=None, forecast_intervals=None, matched_intervals=None):
     if not pairs:
         raise ValueError('Cannot compute forecast quality without overlapping values')
     residuals = []
@@ -1074,10 +1074,14 @@ def metric_summary(pairs, *, expected_intervals=None):
     actual_total = math.fsum(abs(r['actual']) for r in residuals)
     predicted_total = math.fsum(abs(r['predicted']) for r in residuals)
     expected = expected_intervals or len(residuals)
+    forecast_n = len(residuals) if forecast_intervals is None else forecast_intervals
+    matched_n = len(residuals) if matched_intervals is None else matched_intervals
     return {
         'sample_count': len(residuals),
         'expected_intervals': expected,
         'coverage': len(residuals) / expected if expected else 1.0,
+        'forecast_coverage': forecast_n / expected if expected else 1.0,
+        'matched_coverage': matched_n / expected if expected else 1.0,
         'rmse': math.sqrt(squared / len(residuals)),
         'mae': absolute / len(residuals),
         'wape_percent': 100 * absolute / actual_total if actual_total else None,
@@ -1124,13 +1128,16 @@ def cmd_score(args):
     tenant, predictions, forecast_for, forecast_timezone, prediction_row_count = load_predictions(args)
     if prediction_row_count != len(predictions):
         raise ValueError('Forecast contains duplicate timestamps')
+    horizon = None
     if forecast_for is not None:
-        require_forecast_horizon(predictions, truth, forecast_for=forecast_for, timezone=forecast_timezone or actual['timezone'], allow_partial=args.allow_partial)
+        horizon = require_forecast_horizon(predictions, truth, forecast_for=forecast_for, timezone=forecast_timezone or actual['timezone'], allow_partial=args.allow_partial)
     matching = sorted(predictions.keys() & truth.keys())
     if not matching or (len(matching) != len(predictions) and not args.allow_partial):
         raise ValueError('Missing actual values; use --allow-partial only for an explicitly partial report')
-    expected = expected_intervals_for_day(forecast_for, forecast_timezone or actual['timezone']) if forecast_for is not None and not args.allow_partial else len(predictions)
-    metrics, residuals = metric_summary([(t, truth[t], predictions[t]) for t in matching], expected_intervals=expected)
+    expected = expected_intervals_for_day(forecast_for, forecast_timezone or actual['timezone']) if forecast_for is not None else len(predictions)
+    forecast_count = len(predictions)
+    matched_count = len(matching)
+    metrics, residuals = metric_summary([(t, truth[t], predictions[t]) for t in matching], expected_intervals=expected, forecast_intervals=forecast_count, matched_intervals=matched_count)
     metrics = {'tenant_id': tenant, 'series_id': args.series_id, 'unit': actual['unit'], **metrics, 'actual_source': audit}
     save_json(args.out / 'metrics.json', metrics)
     save_json(args.out / 'residuals.json', {'series_id': args.series_id, 'rows': residuals})
@@ -1218,13 +1225,14 @@ def cmd_acceptance_test(args):
     tenant, predictions, forecast_for, forecast_timezone, prediction_row_count = load_predictions(args)
     if prediction_row_count != len(predictions):
         raise ValueError('Acceptance test requires unique prediction timestamps')
+    horizon = None
     if forecast_for is not None:
-        require_forecast_horizon(predictions, truth, forecast_for=forecast_for, timezone=forecast_timezone or actual['timezone'])
+        horizon = require_forecast_horizon(predictions, truth, forecast_for=forecast_for, timezone=forecast_timezone or actual['timezone'])
     matching = sorted(predictions.keys() & truth.keys())
     if not matching or len(matching) != len(predictions):
         raise ValueError('Acceptance test requires complete actuals for every prediction timestamp')
-    expected = expected_intervals_for_day(forecast_for, forecast_timezone or actual['timezone']) if forecast_for is not None else len(predictions)
-    model_metrics, residuals = metric_summary([(t, truth[t], predictions[t]) for t in matching], expected_intervals=expected)
+    expected = horizon['expected_intervals'] if horizon else len(predictions)
+    model_metrics, residuals = metric_summary([(t, truth[t], predictions[t]) for t in matching], expected_intervals=expected, forecast_intervals=len(predictions), matched_intervals=len(matching))
 
     history, history_audit = load_dataset(args.history, args.series_id, args.unit, args.timezone, args=args)
     history_by_ts = {parse_stamp(r['timestamp']): finite_number(r['value']) for r in history['values']}
@@ -1367,18 +1375,18 @@ def resolve_available_at(row, *, mode: str):
     available = parse_optional_stamp(row.get('available_at'), 'available_at', row.get('timestamp') or row.get('ts'))
     ingested = parse_optional_stamp(row.get('ingested_at'), 'ingested_at', row.get('timestamp') or row.get('ts'))
     if available is not None:
-        source = 'available_at'
+        source = 'available_at'; evidence_level = 'VERIFIED'
     elif mode in ('event-time', 'assume-event-time'):
-        available = event; source = 'event_time_assumption'
+        available = event; source = 'event_time_assumption'; evidence_level = 'ASSUMED'
     elif mode == 'ingested-at' and ingested is not None:
-        available = ingested; source = 'ingested_at'
+        available = ingested; source = 'ingested_at'; evidence_level = 'ASSUMED'
     elif mode == 'reject-missing':
         raise ValueError('availability evidence missing / availability proof missing: provide available_at per value or choose an explicit --availability-mode')
     elif mode == 'ingested-at':
         raise ValueError('availability evidence missing / availability proof missing: --availability-mode ingested-at requires ingested_at per value')
     else:
         raise ValueError('Unsupported availability mode: ' + str(mode))
-    return {'event_time': event, 'available_at': available, 'ingested_at': ingested, 'availability_source': source}
+    return {'event_time': event, 'available_at': available, 'ingested_at': ingested, 'availability_source': source, 'evidence_level': evidence_level}
 
 
 
@@ -1442,30 +1450,68 @@ def information_availability_check(dataset, *, as_of: dt.datetime, mode: str = '
     }
 
 
+
+def value_version_id(row):
+    for field in ('value_version', 'version_id', 'revision'):
+        if row.get(field) not in (None, ''):
+            return str(row.get(field))
+    return None
+
+
+def version_sort_key(row):
+    if row.get('revision') not in (None, ''):
+        text = str(row.get('revision'))
+        return (1, int(text)) if text.isdigit() else (1, text)
+    if row.get('value_version') not in (None, ''):
+        return (1, str(row.get('value_version')))
+    if row.get('version_id') not in (None, ''):
+        return (1, str(row.get('version_id')))
+    return (0, '')
+
 def materialize_dataset_as_of(dataset, *, as_of: dt.datetime, mode: str, information_cutoff_value: dt.datetime | None = None):
     selected = {}
     late_rows = []
     source_counts = {}
+    evidence_levels = set()
     duplicate_events = set()
     selected_corrections = 0
+    selection_decisions = []
     for row in dataset.get('values') or []:
         resolved = resolve_available_at(row, mode=mode)
         source_counts[resolved['availability_source']] = source_counts.get(resolved['availability_source'], 0) + 1
+        evidence_levels.add(resolved['evidence_level'])
         event = resolved['event_time']; available = resolved['available_at']
+        version_id = value_version_id(row)
+        candidate = {'event_time': event.isoformat(), 'available_at': available.isoformat(), 'value_version': version_id, 'value': row.get('value')}
         if information_cutoff_value is not None and event >= information_cutoff_value:
-            late_rows.append({'timestamp': event.isoformat(), 'available_at': available.isoformat(), 'code': 'event_time_after_information_cutoff', 'message': 'event_time/timestamp is not before information_cutoff'})
+            late_rows.append({**candidate, 'code': 'event_time_after_information_cutoff', 'message': 'event_time/timestamp is not before information_cutoff'})
             continue
         if available > as_of:
-            late_rows.append({'timestamp': event.isoformat(), 'available_at': available.isoformat(), 'code': 'available_after_as_of', 'message': 'value was available after as_of'})
+            late_rows.append({**candidate, 'code': 'available_after_as_of', 'message': 'value was available after as_of'})
             continue
         if event in selected:
             duplicate_events.add(event)
-            if available >= selected[event][0]:
+            current_available, current_resolved, current_row = selected[event]
+            if available == current_available:
+                current_version = value_version_id(current_row)
+                if version_id is None or current_version is None or version_sort_key(row) == version_sort_key(current_row):
+                    if finite_number(row.get('value')) != finite_number(current_row.get('value')):
+                        raise ValueError('ambiguous correction versions / ambiguous data versions for ' + event.isoformat() + ': equal available_at requires a stable value_version/revision ordering')
+                if version_sort_key(row) > version_sort_key(current_row):
+                    selected_corrections += 1
+                    selection_decisions.append({'event_time': event.isoformat(), 'selected_version': version_id, 'previous_version': current_version, 'reason': 'higher_revision_same_available_at'})
+                    selected[event] = (available, resolved, row)
+                else:
+                    selection_decisions.append({'event_time': event.isoformat(), 'selected_version': current_version, 'rejected_version': version_id, 'reason': 'lower_or_equal_revision_same_available_at'})
+            elif available > current_available:
                 selected_corrections += 1
+                selection_decisions.append({'event_time': event.isoformat(), 'selected_version': version_id, 'previous_version': value_version_id(current_row), 'reason': 'latest_available_before_as_of'})
                 selected[event] = (available, resolved, row)
+            else:
+                selection_decisions.append({'event_time': event.isoformat(), 'selected_version': value_version_id(current_row), 'rejected_version': version_id, 'reason': 'older_available_at'})
         else:
             selected[event] = (available, resolved, row)
-    missing_versions = [item for item in late_rows if parse_stamp(item['timestamp']) not in selected]
+    missing_versions = [item for item in late_rows if parse_stamp(item['event_time']) not in selected]
     if missing_versions:
         raise ValueError('value available after as_of or after information cutoff: ' + str(missing_versions[:3]))
     values = []
@@ -1477,12 +1523,15 @@ def materialize_dataset_as_of(dataset, *, as_of: dt.datetime, mode: str, informa
         if resolved.get('ingested_at') is not None:
             item['ingested_at'] = resolved['ingested_at'].isoformat()
         item['availability_source'] = resolved['availability_source']
+        item['availability_evidence'] = resolved['evidence_level']
         values.append(item)
     materialized = dict(dataset)
     materialized['values'] = values
+    evidence_level = 'ASSUMED' if 'ASSUMED' in evidence_levels else 'VERIFIED' if evidence_levels else 'UNVERIFIABLE'
     check = {
         'status': 'ok',
         'mode': mode,
+        'evidence_level': evidence_level,
         'as_of': as_of.isoformat(),
         'information_cutoff': information_cutoff_value.isoformat() if information_cutoff_value else None,
         'records': len(dataset.get('values') or []),
@@ -1492,9 +1541,9 @@ def materialize_dataset_as_of(dataset, *, as_of: dt.datetime, mode: str, informa
         'selected_corrections': selected_corrections,
         'rejected_after_as_of': len(late_rows),
         'rejected_examples': late_rows[:20],
+        'selection_decisions': selection_decisions[:100],
     }
     return materialized, check
-
 
 def artifact_ref(path: Path, value=None):
     ref = {'path': str(path.name)}
@@ -1518,7 +1567,33 @@ def integrity_gate(name: str, result: dict, *, required=True):
     return payload
 
 
-def build_integrity_receipt(*, operation: str, tenant_id=None, series_id=None, as_of=None, information_cutoff_value=None, artifacts=None, gates=None, links=None):
+
+def artifact_manifest(out: Path, names):
+    items = []
+    for name in names:
+        path = out / name
+        if path.exists():
+            data = path.read_bytes()
+            items.append({'path': name, 'sha256': sha256_bytes(data), 'size_bytes': len(data)})
+    manifest = {'schema_version': 'cernion.forecast.artifact-manifest.v1', 'created_at': dt.datetime.now(UTC).isoformat(), 'artifacts': items}
+    save_json(out / 'artifact_manifest.json', manifest)
+    manifest['sha256'] = sha256_bytes((out / 'artifact_manifest.json').read_bytes())
+    return manifest
+
+
+def compute_integrity_decision(gates):
+    required = [g for g in gates if g.get('required', True)]
+    if any(g.get('status') not in ('pass', 'ok') for g in required):
+        return {'status': 'REJECTED', 'availability_evidence': 'UNVERIFIABLE'}
+    availability = next((g for g in gates if g.get('name') == 'information_availability_check' or g.get('name') == 'information_availability'), {})
+    evidence = availability.get('evidence_level') or 'VERIFIED'
+    return {'status': 'ACCEPTED_WITH_ASSUMPTIONS' if evidence == 'ASSUMED' else 'ACCEPTED', 'availability_evidence': evidence}
+
+
+def compute_forecast_acceptance_decision(gate):
+    return {'status': 'ACCEPTED' if gate.get('status') == 'pass' else 'REJECTED', 'quality_gate_status': gate.get('status'), 'checks': gate.get('checks')}
+
+def build_integrity_receipt(*, operation: str, tenant_id=None, series_id=None, as_of=None, information_cutoff_value=None, artifacts=None, gates=None, links=None, integrity_decision=None, forecast_acceptance_decision=None):
     gate_items = gates or []
     gate_map = {}
     for gate in gate_items:
@@ -1528,7 +1603,8 @@ def build_integrity_receipt(*, operation: str, tenant_id=None, series_id=None, a
         elif key.endswith('_quality') or key == 'quality_report':
             key = key.replace('_quality', '_quality_report') if key.endswith('_quality') else 'quality_report'
         gate_map[key] = {k: v for k, v in gate.items() if k != 'name'}
-    status = 'pass' if all(g.get('status') in ('pass', 'ok') for g in gate_map.values() if g.get('required', True)) else 'fail'
+    integrity_decision = integrity_decision or compute_integrity_decision(gate_items)
+    status = 'pass' if integrity_decision.get('status') in ('ACCEPTED', 'ACCEPTED_WITH_ASSUMPTIONS') else 'fail'
     receipt = {
         'contract_id': 'CET-FC-DIC-001',
         'receipt_schema_version': 'cernion.forecast.integrity-receipt.v1',
@@ -1540,6 +1616,8 @@ def build_integrity_receipt(*, operation: str, tenant_id=None, series_id=None, a
         'series_id': series_id,
         'as_of': as_of.isoformat() if isinstance(as_of, dt.datetime) else as_of,
         'information_cutoff': information_cutoff_value.isoformat() if isinstance(information_cutoff_value, dt.datetime) else information_cutoff_value,
+        'integrity_decision': integrity_decision,
+        'forecast_acceptance_decision': forecast_acceptance_decision,
         'gates': gate_map,
         'artifacts': artifacts or {},
         'links': links or {},
@@ -1672,6 +1750,8 @@ def cmd_e2e(args):
         'baseline_metrics': baseline_metrics,
         'quality_gate': gate,
     }
+    forecast_acceptance = compute_forecast_acceptance_decision(gate)
+    summary['forecast_acceptance_decision'] = forecast_acceptance
     receipt_gates = [
         integrity_gate('history_quality', history_quality),
         integrity_gate('actual_quality', actual_quality),
@@ -1679,14 +1759,9 @@ def cmd_e2e(args):
         integrity_gate('history_window_check', history_window),
         integrity_gate('information_availability_check', availability),
         integrity_gate('forecast_horizon_check', horizon),
-        integrity_gate('quality_gate', gate),
     ]
-    receipt = build_integrity_receipt(operation='e2e', tenant_id=tenant, series_id=history['series_id'], as_of=as_of, information_cutoff_value=cutoff, artifacts={'run_manifest': {'path': 'run_manifest.json'}, 'prediction_result': {'path': 'prediction_result.json'}, 'quality_gate': {'path': 'quality_gate.json'}, 'e2e_summary': {'path': 'e2e-summary.json'}}, gates=receipt_gates, links={'run_manifest': 'run_manifest.json', 'data_import': 'run_manifest.json#history_result', 'training': 'run_manifest.json#train_result', 'prediction': 'prediction_result.json', 'quality_report': 'quality_gate.json'})
-    manifest['integrity_receipt'] = {'path': 'integrity_receipt.json', 'sha256': receipt['receipt_hash']}
-    summary['integrity_receipt'] = manifest['integrity_receipt']
-    save_integrity_receipt(args.out, receipt)
     save_json(args.out / 'run_manifest.json', manifest)
-    save_json(args.out / 'prediction_result.json', {'tenant_id': tenant, 'base_url': client.base, 'result': forecast_result, 'client_run_id': predict_idem, 'integrity_receipt': manifest['integrity_receipt']})
+    save_json(args.out / 'prediction_result.json', {'tenant_id': tenant, 'base_url': client.base, 'result': forecast_result, 'client_run_id': predict_idem})
     save_json(args.out / 'baseline_metrics.json', baseline_metrics)
     save_json(args.out / 'quality_gate.json', gate)
     save_json(args.out / 'e2e-summary.json', summary)
@@ -1702,9 +1777,42 @@ def cmd_e2e(args):
     for key, value in gate['checks'].items():
         lines.append(f"- {'OK' if value else 'FAIL'} {key}")
     (args.out / 'e2e-report.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    manifest_hash = artifact_manifest(args.out, ['run_manifest.json', 'prediction_result.json', 'baseline_metrics.json', 'quality_gate.json', 'e2e-summary.json', 'residuals.json', 'residuals.csv', 'e2e-report.md'])
+    receipt = build_integrity_receipt(operation='e2e', tenant_id=tenant, series_id=history['series_id'], as_of=as_of, information_cutoff_value=cutoff, artifacts={'artifact_manifest': {'path': 'artifact_manifest.json', 'sha256': manifest_hash['sha256']}}, gates=receipt_gates, links={'artifact_manifest': 'artifact_manifest.json', 'run_manifest': 'run_manifest.json', 'data_import': 'run_manifest.json#history_result', 'training': 'run_manifest.json#train_result', 'prediction': 'prediction_result.json', 'quality_report': 'quality_gate.json'}, forecast_acceptance_decision=forecast_acceptance)
+    save_integrity_receipt(args.out, receipt)
     print('\n'.join(lines))
     return 0 if gate['status'] == 'pass' else 50
 
+
+
+def cmd_verify_receipt(args):
+    fresh_out(args.out, getattr(args, 'resume_out', False))
+    receipt_path = args.receipt if getattr(args, 'receipt', None) else args.run_dir / 'integrity_receipt.json'
+    receipt = read_json(receipt_path)
+    run_dir = receipt_path.parent
+    manifest_ref = (receipt.get('artifacts') or {}).get('artifact_manifest') or {}
+    manifest_path = run_dir / (manifest_ref.get('path') or 'artifact_manifest.json')
+    manifest = read_json(manifest_path)
+    checks = []
+    expected_manifest_hash = manifest_ref.get('sha256')
+    if expected_manifest_hash and sha256_bytes(manifest_path.read_bytes()) != expected_manifest_hash:
+        checks.append({'path': manifest_path.name, 'status': 'failed', 'reason': 'artifact manifest hash mismatch'})
+    for item in manifest.get('artifacts') or []:
+        path = run_dir / item['path']
+        if not path.exists():
+            checks.append({'path': item['path'], 'status': 'failed', 'reason': 'artifact missing'})
+            continue
+        actual = sha256_bytes(path.read_bytes())
+        if actual != item.get('sha256'):
+            checks.append({'path': item['path'], 'status': 'failed', 'reason': 'artifact hash mismatch', 'expected': item.get('sha256'), 'actual': actual})
+        else:
+            checks.append({'path': item['path'], 'status': 'ok'})
+    status = 'ok' if all(c['status'] == 'ok' for c in checks) else 'failed'
+    report = {'status': status, 'receipt': str(receipt_path), 'artifact_manifest': str(manifest_path), 'checks': checks}
+    save_json(args.out / 'receipt_verification.json', report)
+    if status != 'ok':
+        raise ValueError('; '.join(c['reason'] for c in checks if c['status'] != 'ok'))
+    print('Receipt verified: ' + str(args.out / 'receipt_verification.json'))
 
 def cmd_doctor(args):
     fresh_out(args.out, getattr(args, 'resume_out', False))
@@ -1848,7 +1956,7 @@ def cmd_describe(args):
     payload = {'name': 'cernion-forecast-cli', 'version': CLI_VERSION, 'schema_version': ARTIFACT_SCHEMA,
                'commands': ['day-ahead', 'history', 'enroll', 'train', 'predict', 'resume', 'score', 'acceptance-test', 'e2e', 'doctor', 'batch', 'describe'],
                'exit_codes': {'0': 'success', '1': 'validation/runtime error', '2': 'command line usage error', '10': 'idempotent skip', '50': 'quality/acceptance threshold failed'},
-               'input_formats': ['json', 'csv', 'mscons', 'edi', 'edifact'], 'output_artifacts': ['run.json', 'result.json', 'quality_report.json', 'metrics.json', 'residuals.csv', 'acceptance_report.json', 'e2e-summary.json', 'quality_gate.json', 'integrity_receipt.json']}
+               'input_formats': ['json', 'csv', 'mscons', 'edi', 'edifact'], 'output_artifacts': ['run.json', 'result.json', 'quality_report.json', 'metrics.json', 'residuals.csv', 'acceptance_report.json', 'e2e-summary.json', 'quality_gate.json', 'artifact_manifest.json', 'integrity_receipt.json']}
     print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
@@ -1971,6 +2079,7 @@ def build_parser():
     bh.add_argument('--allow-corrections', action='store_true'); bh.add_argument('--historical-import', action='store_true'); bh.add_argument('--import-mode', choices=['append-only', 'correction', 'replace-period'], default='append-only')
     bh.add_argument('--processed-ledger', type=Path); bh.add_argument('--idempotency-key'); bh.add_argument('--skip-if-processed', action='store_true'); bh.set_defaults(func=cmd_batch_history)
     doctor = sub.add_parser('doctor'); add_common(doctor); doctor.set_defaults(func=cmd_doctor)
+    verify = sub.add_parser('verify-receipt'); verify.add_argument('--receipt', type=Path); verify.add_argument('--run-dir', type=Path); verify.add_argument('--out', type=Path, required=True); verify.add_argument('--resume-out', action='store_true'); verify.set_defaults(func=cmd_verify_receipt)
     batch = sub.add_parser('batch'); add_common(batch); add_quality_args(batch); add_availability_args(batch); add_context_args(batch); add_mscons_select_args(batch)
     batch.add_argument('--manifest', type=Path, required=True); batch.add_argument('--continue-on-error', action='store_true')
     batch.add_argument('--allow-corrections', action='store_true'); batch.add_argument('--historical-import', action='store_true'); batch.add_argument('--import-mode', choices=['append-only', 'correction', 'replace-period'], default='append-only'); batch.set_defaults(func=cmd_batch)

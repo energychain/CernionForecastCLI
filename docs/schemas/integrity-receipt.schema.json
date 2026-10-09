@@ -16,6 +16,12 @@
     "series_id": {"type": ["string", "null"]},
     "as_of": {"type": ["string", "null"], "format": "date-time"},
     "information_cutoff": {"type": ["string", "null"], "format": "date-time"},
+    "integrity_decision": {"enum": ["ACCEPTED", "PROVISIONAL", "REJECTED"]},
+    "integrity_decision_detail": {
+      "type": "object",
+      "properties": {"availability_evidence": {"enum": ["VERIFIED", "ASSUMED", "UNVERIFIABLE"]}}
+    },
+    "forecast_acceptance_decision": {"enum": ["ACCEPTED", "REJECTED", null]},
     "gates": {
       "type": "object",
       "additionalProperties": {

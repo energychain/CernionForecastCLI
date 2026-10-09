@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://energychain.github.io/CernionForecastCLI/schemas/validation-error-strict.schema.json",
+  "title": "Cernion Forecast Validation Error — Productive Contract",
+  "type": "object",
+  "required": ["contract_id", "status", "code", "message", "field"],
+  "additionalProperties": false,
+  "properties": {
+    "contract_id": {"const": "CET-FC-DIC-001"},
+    "status": {"enum": ["REJECTED", "FAILED", "WARNING"]},
+    "code": {
+      "enum": [
+        "INV-001_SERIES_IDENTITY_MISSING",
+        "INV-002_TIMESTAMP_INVALID",
+        "INV-003_SOURCE_PROVENANCE_MISSING",
+        "INV-004_QUALITY_INSUFFICIENT",
+        "INV-005_FORECAST_HORIZON_INVALID",
+        "INV-006_INFORMATION_AVAILABILITY_INVALID",
+        "INV-007_BASELINE_AVAILABILITY_INVALID",
+        "INV-008_ARTIFACT_HASH_MISMATCH",
+        "AT-006_CORRECTION_VERSION_AMBIGUOUS",
+        "AT-010_SERVER_ENFORCEMENT_REQUIRED",
+        "AT-012_TENANT_ISOLATION_REQUIRED"
+      ]
+    },
+    "message": {"type": "string", "minLength": 1},
+    "field": {"type": "string", "minLength": 1},
+    "timestamp": {"type": "string"},
+    "available_at": {"type": "string"},
+    "retryable": {"type": "boolean"}
+  }
+}

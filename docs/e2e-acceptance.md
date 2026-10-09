@@ -26,7 +26,7 @@ The command also enforces the information boundary on two independent axes:
 - `event_time` / `timestamp` must be before the local D-1 cutoff for D-2 forecasting.
 - `available_at` must be less than or equal to the run's `as_of` timestamp.
 
-A value measured before D-2 but first available after `as_of` is rejected for point-in-time backtesting. If historical input lacks `available_at`, `e2e` fails by default. Operators must either provide evidence timestamps or explicitly choose `--availability-mode event-time|ingested-at|assume-event-time|assume-ingested`; the selected mode is recorded in `integrity_receipt.json`.
+A value measured before D-2 but first available after `as_of` is rejected for point-in-time backtesting. If historical input lacks `available_at`, `e2e` fails by default. Operators must either provide evidence timestamps or explicitly choose `--availability-mode event-time|ingested-at|assume-event-time|assume-ingested`; the selected mode is recorded in `integrity_receipt.json`. Assumption modes produce an `integrity_decision` of `PROVISIONAL`, not unrestricted `ACCEPTED`.
 
 The computed `information_cutoff`, `as_of`, availability gate and any rejection reason are written to the E2E manifest/summary and receipt.
 
@@ -68,6 +68,7 @@ Use the profile that matches the operational decision, not the profile that make
 
 - `run_manifest.json`
 - `integrity_receipt.json`
+- `artifact_manifest.json`
 - `prediction_result.json`
 - `baseline_metrics.json`
 - `quality_gate.json`

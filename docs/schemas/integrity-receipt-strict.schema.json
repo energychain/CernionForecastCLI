@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://energychain.github.io/CernionForecastCLI/schemas/integrity-receipt-strict.schema.json",
+  "title": "Cernion Forecast Integrity Evidence Receipt — Productive Contract",
+  "type": "object",
+  "required": ["contract_id", "receipt_schema_version", "status", "integrity_decision", "forecast_acceptance_decision", "operation", "created_at", "created_by", "tenant_id", "series_id", "as_of", "information_cutoff", "gates", "artifacts", "links", "receipt_hash"],
+  "additionalProperties": true,
+  "properties": {
+    "contract_id": {"const": "CET-FC-DIC-001"},
+    "receipt_schema_version": {"const": "cernion.forecast.integrity-receipt.v1"},
+    "status": {"enum": ["pass", "fail"]},
+    "integrity_decision": {"enum": ["ACCEPTED", "PROVISIONAL", "REJECTED"]},
+    "forecast_acceptance_decision": {"enum": ["ACCEPTED", "REJECTED"]},
+    "operation": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "created_by": {"type": "string"},
+    "tenant_id": {"type": "string"},
+    "series_id": {"type": "string"},
+    "as_of": {"type": "string", "format": "date-time"},
+    "information_cutoff": {"type": "string", "format": "date-time"},
+    "gates": {
+      "type": "object",
+      "required": ["history_quality_report", "actual_quality_report", "leakage_check", "history_window_check", "availability", "forecast_horizon_check"],
+      "additionalProperties": false,
+      "properties": {
+        "history_quality_report": {"$ref": "#/$defs/gate"},
+        "actual_quality_report": {"$ref": "#/$defs/gate"},
+        "leakage_check": {"$ref": "#/$defs/gate"},
+        "history_window_check": {"$ref": "#/$defs/gate"},
+        "availability": {"$ref": "#/$defs/gate"},
+        "forecast_horizon_check": {"$ref": "#/$defs/gate"}
+      }
+    },
+    "artifacts": {"type": "object", "required": ["artifact_manifest"]},
+    "links": {"type": "object", "required": ["artifact_manifest", "run_manifest", "prediction", "quality_report"]},
+    "receipt_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "gate": {"type": "object", "required": ["status", "required"], "properties": {"status": {"enum": ["pass", "fail"]}, "required": {"type": "boolean"}}, "additionalProperties": true}
+  }
+}

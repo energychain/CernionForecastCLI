@@ -9,12 +9,19 @@ The project follows semantic-versioning intent. Before `1.0.0`, command names an
 ### Added
 
 - Added executable availability semantics for point-in-time backtests: `event_time`, `available_at`, `ingested_at` and `as_of` are separate concepts; `e2e` rejects missing availability proof unless an explicit `--availability-mode` is selected and materializes the latest value version available at `as_of`.
+- Added provisional integrity decisions for assumed availability modes, with `VERIFIED`/`ASSUMED`/`UNVERIFIABLE` evidence classification.
+- Added artifact-manifest binding plus `verify-receipt` so `integrity_receipt.json` can verify SHA-256 hashes of persisted E2E artifacts.
 - Added `integrity_receipt.json` as a versioned machine-readable `CET-FC-DIC-001` evidence receipt for E2E runs, linked to import, training, prediction, horizon, quality and gate artifacts.
 - Added JSON Schemas under `docs/schemas/` for canonical time series, information cutoff, integrity receipt and validation errors.
+- Added strict productive conformance schemas for canonical time series, information cutoff, integrity receipts and validation errors, separating permissive exchange objects from contract-bound production evidence.
+- Added `verify-receipt` to verify artifact-manifest hashes bound by `integrity_receipt.json`.
 
 ### Fixed
 
 - `--allow-partial` no longer accepts forecasts with duplicate timestamps or predictions outside the expected horizon; it only tolerates missing values.
+- Partial scoring now keeps the forecast-day expected interval count independent of delivered prediction count and reports `coverage`, `forecast_coverage` and `matched_coverage` separately.
+- Integrity receipts now separate `integrity_decision` from `forecast_acceptance_decision`; a poor forecast no longer invalidates data-integrity evidence.
+- E2E point-in-time materialization rejects equally ranked conflicting value versions unless a stable `value_version`/`revision` ordering is supplied.
 
 ### Documentation
 

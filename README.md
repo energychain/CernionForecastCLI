@@ -403,7 +403,8 @@ cernion-forecast e2e \
 The command writes:
 
 - `run_manifest.json` — periods, API run IDs, context, leakage check and raw API results.
-- `integrity_receipt.json` — versioned machine-readable proof for `CET-FC-DIC-001` gates, including availability, leakage, quality, horizon and quality-gate results.
+- `integrity_receipt.json` — versioned machine-readable proof for `CET-FC-DIC-001` integrity gates. It separates `integrity_decision` from `forecast_acceptance_decision`; assumed availability produces `ACCEPTED_WITH_ASSUMPTIONS`, not unrestricted acceptance.
+- `artifact_manifest.json` — SHA-256 binding for the persisted E2E artifacts referenced by the receipt; verify it with `cernion-forecast verify-receipt --run-dir runs/meter-42-e2e-20260929 --out runs/meter-42-e2e-verify`.
 - `prediction_result.json` — forecast envelope from CET.
 - `baseline_metrics.json` — naive baseline metrics.
 - `quality_gate.json` — machine-readable pass/fail decision.
@@ -498,7 +499,7 @@ The project now carries a formal domain contract: [Cernion Forecast — Verbindl
 
 For CernionForecastCLI development this document is the binding fachliche reference for identity, timestamp, MSCONS selection, D-2 information cutoff, `available_at <= as_of` information availability, forecast-horizon validation, baseline integrity, Evidence Receipts, error semantics and acceptance tests. Because the document is explicitly **not yet approved**, code may only claim partial conformance to implemented and tested rules; it must not present the contract as fully released until the open approvals in section 14 are resolved.
 
-Machine-readable contract surfaces are provided under `docs/schemas/` for canonical time series, information cutoff, integrity receipts and validation errors. Historical backtests must either supply explicit `available_at` evidence per value or choose an explicit `--availability-mode`; the default is to reject missing availability proof.
+Machine-readable contract surfaces are provided under `docs/schemas/` for canonical time series, information cutoff, integrity receipts and validation errors. Each has a flexible exchange schema and a stricter productive-conformance schema. Historical backtests must either supply explicit `available_at` evidence per value or choose an explicit `--availability-mode`; the default is to reject missing availability proof. Assumption modes such as `assume-event-time` are marked as `PROVISIONAL` in the integrity receipt and are not unrestricted acceptance.
 
 - Granularity: quarter-hour values.
 - Units: `kWh` interval energy or `kW` average power.
