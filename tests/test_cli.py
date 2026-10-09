@@ -72,10 +72,11 @@ class FakeAPI:
                 elif self.path.endswith('/api/forecast-sandbox/consumption/portfolio/runs/' + 'e'*64):
                     self.reply({'status': 'error', 'error': 'portfolio_failed: missing dependency'})
                 elif self.path.endswith('/api/forecast-sandbox/consumption/portfolio/runs/' + 'd'*64):
-                    self.reply({'status': 'completed', 'result': {'status': 'completed', 'series_id': 'meter-a', 'model_version': 'b'*64, 'forecast_for': '2026-09-29', 'forecast_values': [
-                        {'timestamp': '2026-09-28T00:00:00+02:00', 'predicted_value': 10.5},
-                        {'timestamp': '2026-09-28T00:15:00+02:00', 'predicted_value': 11.5},
-                    ]}})
+                    values = []
+                    for i in range(96):
+                        hh, mm = divmod(i * 15, 60)
+                        values.append({'timestamp': f'2026-09-28T{hh:02d}:{mm:02d}:00+02:00', 'predicted_value': 10.5})
+                    self.reply({'status': 'completed', 'result': {'status': 'completed', 'series_id': 'meter-a', 'model_version': 'b'*64, 'forecast_for': '2026-09-28', 'timezone': 'Europe/Berlin', 'forecast_values': values}})
                 else:
                     self.send_response(404); self.end_headers()
 
@@ -182,7 +183,7 @@ class CLITests(unittest.TestCase):
             dataset = tmp / 'meter.json'
             dataset.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.2}]}))
             out = tmp / 'plan'
-            p = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'meter-a', '--input', str(dataset), '--weather-region', 'DE-BY-Kempten-87435', '--out', str(out))
+            p = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'meter-a', '--input', str(dataset), '--quality-policy', 'lenient', '--weather-region', 'DE-BY-Kempten-87435', '--out', str(out))
             self.assertEqual(p.returncode, 0, p.stderr)
             run = json.loads((out / 'run.json').read_text())
             self.assertEqual(run['operation'], 'history')
@@ -198,7 +199,7 @@ class CLITests(unittest.TestCase):
             out = tmp / 'plan'
             p = run_cli(
                 'history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'meter-a',
-                '--input', str(dataset), '--weather-region', 'DE-BY-Kempten-87435',
+                '--input', str(dataset), '--quality-policy', 'lenient', '--weather-region', 'DE-BY-Kempten-87435',
                 '--postal-code', '87435', '--municipality', 'Kempten', '--out', str(out)
             )
             self.assertEqual(p.returncode, 0, p.stderr)
@@ -219,7 +220,7 @@ class CLITests(unittest.TestCase):
             p = run_cli(
                 'history', '--dry-run', '--tenant-id', 'tenant-a',
                 '--series-id', 'DE0003966698900000000000052335107',
-                '--input', str(mscons), '--out', str(out)
+                '--input', str(mscons), '--quality-policy', 'lenient', '--out', str(out)
             )
             self.assertEqual(p.returncode, 0, p.stderr)
             run = json.loads((out / 'run.json').read_text())
@@ -243,7 +244,7 @@ class CLITests(unittest.TestCase):
                 p = run_cli(
                     'history', '--base-url', api.url, '--tenant-id', 'tenant-a',
                     '--series-id', 'DE0003966698900000000000052335107',
-                    '--input', str(mscons), '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890'}
+                    '--input', str(mscons), '--quality-policy', 'lenient', '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890'}
                 )
                 self.assertEqual(p.returncode, 0, p.stderr)
                 history_post = [c for c in api.calls if c[1].endswith('/history')][0][2]
@@ -268,7 +269,7 @@ class CLITests(unittest.TestCase):
                 dataset.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.2}]}))
                 out = tmp / 'enroll'
                 secret = 'ck_12345678901234567890abcdef'
-                p = run_cli('enroll', '--base-url', api.url, '--tenant-id', 'tenant-a', '--series-id', 'meter-a', '--input', str(dataset), '--forecast-for', '2026-09-28', '--out', str(out), env={'CET_API_TOKEN': secret})
+                p = run_cli('enroll', '--base-url', api.url, '--tenant-id', 'tenant-a', '--series-id', 'meter-a', '--input', str(dataset), '--quality-policy', 'lenient', '--forecast-for', '2026-09-28', '--out', str(out), env={'CET_API_TOKEN': secret})
                 self.assertEqual(p.returncode, 0, p.stderr)
                 combined = p.stdout + p.stderr + (out / 'run.json').read_text() + (out / 'result.json').read_text()
                 self.assertNotIn(secret, combined)
@@ -289,12 +290,12 @@ class CLITests(unittest.TestCase):
                 mscons = tmp / 'meter.edi'
                 mscons.write_text(SAMPLE_MSCONS)
                 out = tmp / 'mscons-history'
-                p = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(mscons), '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890abcdef'})
+                p = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(mscons), '--quality-policy', 'lenient', '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890abcdef'})
                 self.assertEqual(p.returncode, 0, p.stderr)
                 post = [c for c in api.calls if c[1].endswith('/history')][0]
                 dataset = post[2]['dataset']
                 self.assertEqual(dataset['series_id'], 'meter-a')
-                self.assertEqual(dataset['values'][0]['timestamp'], '2026-10-06T00:00:00+00:00')
+                self.assertEqual(dataset['values'][0]['timestamp'], '2026-10-05T22:00:00+00:00')
                 self.assertEqual(dataset['values'][1]['quality'], 'estimated')
                 self.assertEqual(dataset['source']['format'], 'mscons')
                 self.assertEqual(dataset['source']['documentNumber'], 'DOC20261006001')
@@ -333,10 +334,10 @@ class CLITests(unittest.TestCase):
             prediction.write_text(json.dumps({'tenant_id': 'tenant-a', 'result': {'status': 'completed', 'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'forecast_for': '2026-09-28', 'forecast_values': [{'timestamp': '2026-09-28T00:00:00+02:00', 'predicted_value': 1.0}, {'timestamp': '2026-09-28T00:15:00+02:00', 'predicted_value': 2.0}]}}))
             actual = tmp / 'actual.json'
             actual.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-28T00:00:00+02:00', 'value': 1.5}]}))
-            p = run_cli('score', '--series-id', 'meter-a', '--predictions', str(prediction), '--actuals', str(actual), '--out', str(tmp / 'score'))
+            p = run_cli('score', '--series-id', 'meter-a', '--predictions', str(prediction), '--actuals', str(actual), '--quality-policy', 'lenient', '--out', str(tmp / 'score'))
             self.assertEqual(p.returncode, 1)
-            self.assertIn('Missing actual values', p.stderr)
-            p2 = run_cli('score', '--series-id', 'meter-a', '--predictions', str(prediction), '--actuals', str(actual), '--allow-partial', '--out', str(tmp / 'score2'))
+            self.assertIn('forecast horizon incomplete', p.stderr)
+            p2 = run_cli('score', '--series-id', 'meter-a', '--predictions', str(prediction), '--actuals', str(actual), '--quality-policy', 'lenient', '--allow-partial', '--out', str(tmp / 'score2'))
             self.assertEqual(p2.returncode, 0, p2.stderr)
 
     def test_acceptance_test_compares_forecast_against_naive_benchmarks(self):
@@ -399,7 +400,7 @@ class CLITests(unittest.TestCase):
             good = tmp / 'good.edi'
             good.write_text(SAMPLE_MSCONS, encoding='utf-8')
             out2 = tmp / 'good-out'
-            p2 = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'meter-a', '--input', str(good), '--mscons-timezone', 'Europe/Berlin', '--out', str(out2))
+            p2 = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'meter-a', '--input', str(good), '--quality-policy', 'lenient', '--mscons-timezone', 'Europe/Berlin', '--out', str(out2))
             self.assertEqual(p2.returncode, 0, p2.stderr)
             run = json.loads((out2 / 'run.json').read_text())
             self.assertEqual(run['input_provenance'][0]['timezone'], 'Europe/Berlin')
@@ -413,10 +414,10 @@ class CLITests(unittest.TestCase):
                 dataset.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.2}]}))
                 ledger = tmp / 'processed.jsonl'
                 out1 = tmp / 'first'
-                p1 = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(dataset), '--processed-ledger', str(ledger), '--idempotency-key', 'auto', '--out', str(out1), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
+                p1 = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(dataset), '--quality-policy', 'lenient', '--processed-ledger', str(ledger), '--idempotency-key', 'auto', '--out', str(out1), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
                 self.assertEqual(p1.returncode, 0, p1.stderr)
                 out2 = tmp / 'second'
-                p2 = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(dataset), '--processed-ledger', str(ledger), '--idempotency-key', 'auto', '--skip-if-processed', '--out', str(out2), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
+                p2 = run_cli('history', '--base-url', api.url, '--series-id', 'meter-a', '--input', str(dataset), '--quality-policy', 'lenient', '--processed-ledger', str(ledger), '--idempotency-key', 'auto', '--skip-if-processed', '--out', str(out2), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
                 self.assertEqual(p2.returncode, 10, p2.stderr)
                 summary = json.loads((out2 / 'summary.json').read_text())
                 self.assertEqual(summary['status'], 'skipped_already_processed')
@@ -455,7 +456,7 @@ class CLITests(unittest.TestCase):
                 dataset = {'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-24T00:00:00+02:00', 'value': 1.2}]}
                 (inbox / 'one.json').write_text(json.dumps(dataset))
                 out = tmp / 'batch'
-                p = run_cli('batch-history', '--base-url', api.url, '--input-dir', str(inbox), '--glob', '*.json', '--series-id-field', 'series_id', '--log-format', 'json', '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
+                p = run_cli('batch-history', '--base-url', api.url, '--input-dir', str(inbox), '--glob', '*.json', '--quality-policy', 'lenient', '--series-id-field', 'series_id', '--log-format', 'json', '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
                 self.assertEqual(p.returncode, 0, p.stderr)
                 summary = json.loads((out / 'summary.json').read_text())
                 self.assertEqual(summary['processed'], 1)
@@ -494,7 +495,7 @@ class CLITests(unittest.TestCase):
                 pred.write_text(json.dumps({'tenant_id': 'tenant-a', 'result': {'series_id': 'meter-a', 'forecast_values': [{'timestamp': '2026-09-28T00:00:00+02:00', 'predicted_value': 10.0}]}}))
                 actual = tmp / 'actual.json'
                 actual.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-28T00:00:00+02:00', 'value': 1.0}]}))
-                score = run_cli('score', '--series-id', 'meter-a', '--predictions', str(pred), '--actuals', str(actual), '--fail-if-wape-above', '10', '--out', str(tmp / 'score'))
+                score = run_cli('score', '--series-id', 'meter-a', '--predictions', str(pred), '--actuals', str(actual), '--quality-policy', 'lenient', '--fail-if-wape-above', '10', '--out', str(tmp / 'score'))
                 self.assertEqual(score.returncode, 50)
         finally:
             api.close()
@@ -525,13 +526,10 @@ class CLITests(unittest.TestCase):
                         {'timestamp': f'2026-08-{day:02d}T00:00:00+02:00', 'value': 9.0 + (day % 3)},
                         {'timestamp': f'2026-08-{day:02d}T00:15:00+02:00', 'value': 10.0 + (day % 3)},
                     ])
-                # Baseline source points for forecast_for=2026-09-28.
-                history_values.extend([
-                    {'timestamp': '2026-09-21T00:00:00+02:00', 'value': 9.0},
-                    {'timestamp': '2026-09-21T00:15:00+02:00', 'value': 10.0},
-                    {'timestamp': '2026-09-27T00:00:00+02:00', 'value': 8.0},
-                    {'timestamp': '2026-09-27T00:15:00+02:00', 'value': 9.0},
-                ])
+                # Baseline source points for forecast_for=2026-09-28; D-1 is intentionally absent.
+                for i in range(96):
+                    hh, mm = divmod(i * 15, 60)
+                    history_values.append({'timestamp': f'2026-09-21T{hh:02d}:{mm:02d}:00+02:00', 'value': 12.0})
                 history.write_text(json.dumps({
                     'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin',
                     'values': history_values,
@@ -539,16 +537,16 @@ class CLITests(unittest.TestCase):
                 actuals.write_text(json.dumps({
                     'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin',
                     'values': [
-                        {'timestamp': '2026-09-28T00:00:00+02:00', 'value': 10.0},
-                        {'timestamp': '2026-09-28T00:15:00+02:00', 'value': 12.0},
+                        {'timestamp': f'2026-09-28T{hh:02d}:{mm:02d}:00+02:00', 'value': 10.0}
+                        for hh in range(24) for mm in (0, 15, 30, 45)
                     ]
                 }))
                 out = tmp / 'e2e'
                 p = run_cli(
                     'e2e', '--base-url', api.url, '--series-id', 'meter-a',
                     '--history', str(history), '--actuals', str(actuals),
-                    '--forecast-for', '2026-09-28', '--quality-profile', 'system-load',
-                    '--baselines', 'previous-day,previous-week', '--max-wape', '10',
+                    '--forecast-for', '2026-09-28', '--quality-policy', 'lenient', '--quality-profile', 'system-load',
+                    '--baselines', 'previous-week', '--max-wape', '10',
                     '--baseline-tolerance', '1.0', '--location', 'Berlin',
                     '--weather-region', 'DE-BE-Berlin', '--min-observed-history-days', '0',
                     '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890'}
@@ -559,7 +557,7 @@ class CLITests(unittest.TestCase):
                 self.assertEqual(summary['forecast_metrics']['coverage'], 1.0)
                 self.assertLessEqual(summary['forecast_metrics']['wape_percent'], 10)
                 self.assertIn('previous_week', summary['baseline_metrics'])
-                self.assertIn('previous_day', summary['baseline_metrics'])
+                self.assertNotIn('previous_day', summary['baseline_metrics'])
                 self.assertEqual(summary['leakage_check']['status'], 'ok')
                 self.assertEqual(summary['forecast_context']['location'], 'Berlin')
                 self.assertTrue((out / 'e2e-report.md').exists())
@@ -586,7 +584,7 @@ class CLITests(unittest.TestCase):
                 p = run_cli(
                     'e2e', '--base-url', api.url, '--series-id', 'meter-a',
                     '--history', str(history), '--actuals', str(actuals),
-                    '--forecast-for', '2026-10-01', '--out', str(tmp / 'e2e'),
+                    '--forecast-for', '2026-10-01', '--quality-policy', 'lenient', '--out', str(tmp / 'e2e'),
                     env={'CET_API_TOKEN': 'ck_12345678901234567890'}
                 )
                 self.assertEqual(p.returncode, 1)
@@ -614,7 +612,7 @@ class CLITests(unittest.TestCase):
             mscons = tmp / 'multi.mscons'
             second = SAMPLE_MSCONS.replace("LOC+172+DE0003966698900000000000052335107'", "LOC+172+DE0003966698900000000000099999999'").replace("UNH+1", "UNH+2").replace("UNT+16+1", "UNT+16+2")
             mscons.write_text(SAMPLE_MSCONS + second, encoding='utf-8')
-            p = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--input', str(mscons), '--out', str(tmp / 'out'))
+            p = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--input', str(mscons), '--quality-policy', 'lenient', '--out', str(tmp / 'out'))
             self.assertEqual(p.returncode, 1)
             self.assertIn('multiple candidate time series', p.stderr)
 
@@ -639,6 +637,105 @@ class CLITests(unittest.TestCase):
             p = run_cli('batch-history', '--input-dir', str(inbox), '--glob', '../outside.json', '--base-url', 'http://127.0.0.1:1', '--out', str(tmp / 'batch'), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
             self.assertEqual(p.returncode, 1)
             self.assertIn('escapes input directory', p.stderr)
+
+    def test_e2e_rejects_history_after_d2_cutoff_before_api_calls(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                history_values = []
+                for day in range(1, 29):
+                    history_values.append({'timestamp': f'2026-08-{day:02d}T00:00:00+02:00', 'value': 1.0})
+                history_values.append({'timestamp': '2026-09-27T00:00:00+02:00', 'value': 99.0})
+                history = tmp / 'history.json'
+                actuals = tmp / 'actuals.json'
+                history.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': history_values}))
+                actuals.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-28T00:00:00+02:00', 'value': 1.0}]}))
+                p = run_cli('e2e', '--base-url', api.url, '--series-id', 'meter-a', '--history', str(history), '--actuals', str(actuals), '--forecast-for', '2026-09-28', '--min-coverage', '0', '--allow-gaps', '--out', str(tmp / 'e2e'), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
+                self.assertEqual(p.returncode, 1)
+                self.assertIn('information cutoff', p.stderr)
+                self.assertFalse(api.calls)
+        finally:
+            api.close()
+
+    def test_mscons_series_id_does_not_resolve_multiple_candidates(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            mscons = tmp / 'multi.mscons'
+            second = SAMPLE_MSCONS.replace("LOC+172+DE0003966698900000000000052335107'", "LOC+172+DE0003966698900000000000099999999'").replace("UNH+1", "UNH+2").replace("UNT+16+1", "UNT+16+2")
+            mscons.write_text(SAMPLE_MSCONS + second, encoding='utf-8')
+            p = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'internal-series', '--input', str(mscons), '--out', str(tmp / 'out'), '--quality-policy', 'lenient')
+            self.assertEqual(p.returncode, 1)
+            self.assertIn('multiple candidate time series', p.stderr)
+            self.assertIn('DE0003966698900000000000052335107', p.stderr)
+
+    def test_mscons_default_timezone_is_berlin_and_ambiguous_times_are_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            mscons = tmp / 'meter.mscons'
+            mscons.write_text(SAMPLE_MSCONS, encoding='utf-8')
+            p = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'DE0003966698900000000000052335107', '--input', str(mscons), '--out', str(tmp / 'out'), '--quality-policy', 'lenient')
+            self.assertEqual(p.returncode, 0, p.stderr)
+            run = json.loads((tmp / 'out' / 'run.json').read_text())
+            self.assertEqual(run['input_provenance'][0]['timezone'], 'Europe/Berlin')
+            self.assertEqual(run['inputs'][0]['timezone'], 'Europe/Berlin')
+
+            ambiguous = tmp / 'ambiguous.mscons'
+            ambiguous.write_text(SAMPLE_MSCONS.replace('202610060000', '202610250230').replace('202610060015', '202610250245').replace('202610060030', '202610250300'), encoding='utf-8')
+            p2 = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--series-id', 'DE0003966698900000000000052335107', '--input', str(ambiguous), '--out', str(tmp / 'ambiguous-out'), '--quality-policy', 'lenient')
+            self.assertEqual(p2.returncode, 1)
+            self.assertIn('ambiguous local timestamp', p2.stderr)
+
+    def test_score_rejects_incomplete_forecast_horizon(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            prediction = tmp / 'pred.json'
+            prediction.write_text(json.dumps({'tenant_id': 'tenant-a', 'result': {'status': 'completed', 'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'forecast_for': '2026-09-28', 'forecast_values': [{'timestamp': '2026-09-28T00:00:00+02:00', 'predicted_value': 1.0}]}}))
+            actual = tmp / 'actual.json'
+            actual.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-28T00:00:00+02:00', 'value': 1.0}]}))
+            p = run_cli('score', '--series-id', 'meter-a', '--predictions', str(prediction), '--actuals', str(actual), '--quality-policy', 'lenient', '--out', str(tmp / 'score'))
+            self.assertEqual(p.returncode, 1)
+            self.assertIn('forecast horizon incomplete', p.stderr)
+
+    def test_previous_day_baseline_respects_d2_cutoff(self):
+        sys.path.insert(0, str(ROOT / 'src'))
+        from cernion_forecast_cli.cli import baseline_prediction, parse_stamp, information_cutoff
+        history = {parse_stamp('2026-09-27T00:00:00+02:00'): 123.0, parse_stamp('2026-09-21T00:00:00+02:00'): 111.0}
+        target = parse_stamp('2026-09-28T00:00:00+02:00')
+        cutoff = information_cutoff(__import__('datetime').date(2026, 9, 28), 'Europe/Berlin')
+        self.assertIsNone(baseline_prediction(target, history, 'previous-day', as_of=cutoff, timezone='Europe/Berlin'))
+        self.assertEqual(baseline_prediction(target, history, 'previous-week', as_of=cutoff, timezone='Europe/Berlin'), 111.0)
+
+    def test_quality_defaults_are_production_strict(self):
+        sys.path.insert(0, str(ROOT / 'src'))
+        from cernion_forecast_cli.cli import build_parser
+        args = build_parser().parse_args(['history', '--input', 'x.json', '--out', 'out'])
+        self.assertEqual(args.quality_policy, 'strict')
+        self.assertEqual(args.min_coverage, 1.0)
+
+    def test_remote_http_requires_explicit_insecure_flag(self):
+        p = run_cli('doctor', '--base-url', 'http://api.example.invalid', '--out', str(Path(tempfile.mkdtemp()) / 'doctor'))
+        self.assertEqual(p.returncode, 1)
+        self.assertIn('HTTPS is required', p.stderr)
+
+    def test_acceptance_report_handles_undefined_wape(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            actual_values = []
+            pred_values = []
+            history_values = []
+            for i in range(96):
+                hh, mm = divmod(i * 15, 60)
+                actual_values.append({'timestamp': f'2026-09-28T{hh:02d}:{mm:02d}:00+02:00', 'value': 0.0})
+                pred_values.append({'timestamp': f'2026-09-28T{hh:02d}:{mm:02d}:00+02:00', 'predicted_value': 0.0})
+                history_values.append({'timestamp': f'2026-09-21T{hh:02d}:{mm:02d}:00+02:00', 'value': 0.0})
+            actual = tmp / 'actual.json'; actual.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': actual_values}))
+            history = tmp / 'history.json'; history.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': history_values}))
+            pred = tmp / 'pred.json'; pred.write_text(json.dumps({'tenant_id': 'tenant-a', 'result': {'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'forecast_for': '2026-09-28', 'forecast_values': pred_values}}))
+            p = run_cli('acceptance-test', '--series-id', 'meter-a', '--predictions', str(pred), '--actuals', str(actual), '--history', str(history), '--acceptance-profile', 'portfolio', '--benchmarks', 'previous-week', '--quality-policy', 'lenient', '--out', str(tmp / 'accept'))
+            self.assertEqual(p.returncode, 50, p.stderr)
+            report = (tmp / 'accept' / 'acceptance_report.md').read_text()
+            self.assertIn('Model WAPE: undefined', report)
 
 
 if __name__ == '__main__':

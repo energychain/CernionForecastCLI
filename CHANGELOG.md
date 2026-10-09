@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The project follows semantic-versioning intent. Before `1.0.0`, command names and core artifact names are intended to be stable, but JSON artifact details may still evolve when necessary.
 
+## [0.2.2] - 2026-10-09
+
+### Critical fixes
+
+- Enforced the D-2 information cutoff in `e2e`: history containing D-1 or D values is rejected before API upload, and the cutoff is recorded in E2E artifacts.
+- Tightened MSCONS series selection so `series_id` no longer masks ambiguous message/location/OBIS candidates; operators must select exactly one candidate with MeLo/OBIS/CCI/message/document filters.
+- Made MSCONS timestamp handling internally consistent: source timezone defaults to `Europe/Berlin`, is persisted in provenance, and ambiguous/nonexistent local DST timestamps are rejected.
+- Scoring and acceptance now validate the requested forecast horizon against forecast date, timezone and PT15M grid instead of treating a partial prediction result as complete.
+- Baselines respect the D-2 availability cutoff and use local calendar-day shifts instead of UTC-only timedeltas.
+
+### Hardened
+
+- Quality defaults are production-strict (`--quality-policy strict`, `--min-coverage 1.0`); exploratory runs must opt into lenient/warn behavior.
+- Remote HTTP API base URLs are rejected unless explicitly enabled for local/test endpoints with `--allow-insecure-http`; `doctor` now fails if required API routes are missing.
+- Acceptance/E2E reports handle undefined WAPE/bias as a valid metric state instead of crashing on zero-actual totals.
+
 ## [0.2.1] - 2026-10-09
 
 ### Hardened

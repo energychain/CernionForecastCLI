@@ -42,12 +42,14 @@ Symptoms:
 
 ```text
 at least 28 observed history days required before D-2; missing history is not zero
+history contains values after the D-2 information cutoff
 ```
 
 Meaning:
 
 - For `forecast_for = D`, CET portfolio training expects at least 28 observed days up to and including `D-2`.
 - `D-1` and `D` do not count as training history.
+- Values from `D-1` or `D` must not be present in the training upload; keep them as separate actuals/score data.
 - Missing intervals are missing, not zero.
 
 Actions:

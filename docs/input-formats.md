@@ -31,6 +31,7 @@ Rules:
 - Timestamps must carry an explicit UTC offset.
 - Values are quarter-hour interval values.
 - Missing values are absent, not zero-filled.
+- Productive quality defaults are strict: daily coverage is expected to be complete unless you explicitly choose `--quality-policy warn|lenient`, lower `--min-coverage`, or allow gaps for exploratory/local tests.
 
 ## CSV
 
@@ -66,6 +67,10 @@ Supported scope:
 - `STS` quality/status metadata,
 - `UNT` segment count validation.
 
+If a message contains multiple supported candidates, the import fails until exactly one candidate remains after applying `--melo-id`, `--obis`, `--cci-code`, `--message-ref` or `--document-number`. `--series-id` is only the internal CET series identifier and does not select a MSCONS candidate.
+
+MSCONS timestamps are interpreted in the source timezone selected by `--mscons-timezone` and default to `Europe/Berlin`. Ambiguous or nonexistent local timestamps around DST transitions are rejected so operators must resolve the source interpretation explicitly.
+
 The CLI does not generate MSCONS output messages.
 
 ## History versus actuals
@@ -75,4 +80,4 @@ For `score`, `acceptance-test` and `e2e`, keep history and actuals separate:
 - `history` contains observations available before the forecast decision.
 - `actuals` contains later target-day measurements.
 
-`e2e` checks that actuals do not overlap the training/history window.
+`e2e` checks that actuals do not overlap the training/history window and that uploaded history contains no values after the D-2 information cutoff.

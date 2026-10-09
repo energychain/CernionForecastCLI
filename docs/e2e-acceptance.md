@@ -19,6 +19,8 @@ D-1 and D are not counted
 missing history is not zero
 ```
 
+The command also enforces the information boundary: the history uploaded for training must not contain any timestamps at or after local `D-1 00:00`. The computed `information_cutoff` and any rejection reason are written to the E2E manifest/summary.
+
 The default preflight is:
 
 ```bash
@@ -31,7 +33,7 @@ Only set it to `0` for local fake-server tests.
 
 The CLI can compare a model forecast to simple operator baselines:
 
-- `previous-day` / `persistence`
+- `previous-day` / `persistence` (only when available before the configured information cutoff)
 - `previous-week` / `weekly_naive`
 - `rolling-mean`
 
@@ -64,7 +66,7 @@ Use the profile that matches the operational decision, not the profile that make
 - `residuals.json`
 - `residuals.csv`
 
-Exit code `50` means the run completed but the quality/acceptance gate failed.
+Exit code `50` means the run completed but the quality/acceptance gate failed. Validation failures before API calls return `1` and do not upload data.
 
 ## Example
 

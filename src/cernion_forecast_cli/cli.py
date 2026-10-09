@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 ROOT = '/api/forecast-sandbox/consumption/portfolio'
 SANDBOX = '/api/forecast-sandbox/consumption'
 UTC = dt.timezone.utc
-CLI_VERSION = '0.2.1'
+CLI_VERSION = '0.2.2'
 ARTIFACT_SCHEMA = 'cernion.forecast-cli.artifact.v1'
 MSCONS_SUFFIXES = {'.mscons', '.edi', '.edifact'}
 MSCONS_MAX_BYTES = int(os.environ.get('CERNION_FORECAST_MSCONS_MAX_BYTES', str(50 * 1024 * 1024)))
@@ -118,6 +118,10 @@ def log_event(args, event, **fields):
         args.log_file.parent.mkdir(parents=True, exist_ok=True)
         with args.log_file.open('a', encoding='utf-8') as f:
             f.write(text + '\n')
+        try:
+            args.log_file.chmod(0o600)
+        except OSError:
+            pass
     LOG.info(text)
 
 
@@ -220,14 +224,35 @@ def tokenize_edifact(raw: str):
     return {'una': una, 'separators': separators, 'segments': segments}
 
 
-def parse_dtm(value, fmt, timezone='UTC'):
+def localize_strict(naive: dt.datetime, timezone: str) -> dt.datetime:
+    if timezone == 'UTC':
+        return naive.replace(tzinfo=UTC)
+    zone = ZoneInfo(timezone)
+    candidates = []
+    for fold in (0, 1):
+        aware = naive.replace(tzinfo=zone, fold=fold)
+        roundtrip = aware.astimezone(UTC).astimezone(zone).replace(tzinfo=None)
+        if roundtrip == naive:
+            candidates.append(aware)
+    unique = []
+    for item in candidates:
+        if all(item.utcoffset() != existing.utcoffset() for existing in unique):
+            unique.append(item)
+    if not unique:
+        raise ValueError(f'nonexistent local timestamp in {timezone}: {naive.isoformat()}')
+    if len(unique) > 1:
+        raise ValueError(f'ambiguous local timestamp in {timezone}: {naive.isoformat()}')
+    return unique[0]
+
+
+def parse_dtm(value, fmt, timezone='Europe/Berlin'):
     if not value:
         return None
     if fmt == '102' and len(value) == 8:
         return f'{value[0:4]}-{value[4:6]}-{value[6:8]}'
     if fmt in ('203', '303') and len(value) >= 12:
-        zone = UTC if timezone == 'UTC' else ZoneInfo(timezone)
-        return dt.datetime(int(value[0:4]), int(value[4:6]), int(value[6:8]), int(value[8:10]), int(value[10:12]), tzinfo=zone).astimezone(UTC).isoformat()
+        naive = dt.datetime(int(value[0:4]), int(value[4:6]), int(value[6:8]), int(value[8:10]), int(value[10:12]))
+        return localize_strict(naive, timezone).astimezone(UTC).isoformat()
     return None
 
 
@@ -237,7 +262,7 @@ def normalize_party_id(value):
     return value
 
 
-def parse_mscons(raw: str, timezone='UTC'):
+def parse_mscons(raw: str, timezone='Europe/Berlin'):
     tokenized = tokenize_edifact(raw)
     segments = tokenized['segments']
     unb = next((s for s in segments if s['tag'] == 'UNB'), None)
@@ -339,6 +364,20 @@ def parse_mscons(raw: str, timezone='UTC'):
     return {'messages': messages, 'parse_warnings': warnings}
 
 
+def describe_mscons_candidate(message, location, timeseries, values):
+    stamps = [v.get('timestamp') for v in values if v.get('timestamp')]
+    return {
+        'message_ref': message.get('message_ref'),
+        'document_number': message.get('document_number'),
+        'melo_id': location.get('melo_id'),
+        'obis': timeseries.get('obis'),
+        'cci_code': timeseries.get('cci_code'),
+        'period_from': min(stamps) if stamps else location.get('period_from'),
+        'period_to': max(stamps) if stamps else location.get('period_to'),
+        'records': len(values),
+    }
+
+
 def select_mscons_series(parsed, *, series_id=None, melo_id=None, obis=None, cci_code=None, message_ref=None, document_number=None):
     candidates = []
     for message in parsed['messages']:
@@ -361,12 +400,13 @@ def select_mscons_series(parsed, *, series_id=None, melo_id=None, obis=None, cci
                     candidates.append((message, location, timeseries, values))
     if not candidates:
         raise ValueError('MSCONS contains no supported interval values for the selected filters')
-    if len(candidates) > 1 and not (series_id or melo_id or obis or cci_code or message_ref or document_number):
-        raise ValueError('MSCONS contains multiple candidate time series; select with --melo-id, --obis, --cci-code, --message-ref or --document-number')
+    if len(candidates) != 1:
+        details = json.dumps([describe_mscons_candidate(*candidate) for candidate in candidates], ensure_ascii=False)
+        raise ValueError('MSCONS contains multiple candidate time series after applying selection filters; select with --melo-id, --obis, --cci-code, --message-ref or --document-number. candidates=' + details)
     return candidates[0]
 
 
-def dataset_from_mscons(path: Path, series_id: str | None = None, *, melo_id=None, obis=None, cci_code=None, message_ref=None, document_number=None, mscons_timezone='UTC'):
+def dataset_from_mscons(path: Path, series_id: str | None = None, *, melo_id=None, obis=None, cci_code=None, message_ref=None, document_number=None, mscons_timezone='Europe/Berlin'):
     if path.stat().st_size > MSCONS_MAX_BYTES:
         raise ValueError(f'MSCONS file exceeds maximum size of {MSCONS_MAX_BYTES} bytes')
     parsed = parse_mscons(path.read_text(encoding='utf-8-sig'), timezone=mscons_timezone)
@@ -391,10 +431,10 @@ def dataset_from_mscons(path: Path, series_id: str | None = None, *, melo_id=Non
                 'document_date': message['document_date'], 'timezone': message.get('timezone'), 'sender': message['sender'], 'receiver': message['receiver'],
                 'location': {'melo_id': location['melo_id'], 'loc_qualifier': location['loc_qualifier']},
                 'cci_code': timeseries['cci_code'], 'obis': timeseries['obis'], 'parse_warnings': message['parse_warnings']}
-    dataset = {'series_id': sid, 'unit': unit, 'timezone': 'Europe/Berlin', 'mscons_timezone': 'Europe/Berlin',
+    dataset = {'series_id': sid, 'unit': unit, 'timezone': mscons_timezone, 'mscons_timezone': mscons_timezone,
                'value_semantics': 'interval_energy' if unit == 'kWh' else 'average_power',
                'source': source, 'source_envelope': envelope, 'values': values}
-    audit = {'file': path.name, 'sha256': sha256_bytes(path.read_bytes()), 'series_id': sid,
+    audit = {'file': path.name, 'sha256': sha256_bytes(path.read_bytes()), 'series_id': sid, 'timezone': mscons_timezone,
              'records': len(values), 'source_format': 'MSCONS', 'document_number': message['document_number'],
              'message_ref': message['message_ref'], 'melo_id': location['melo_id'], 'obis': timeseries['obis'], 'cci_code': timeseries['cci_code']}
     return dataset, audit
@@ -450,8 +490,8 @@ def load_dataset(path: Path | str, series_id: str | None = None, unit: str | Non
         if unit is not None:
             raise ValueError('MSCONS input derives the unit from QTY segments; do not pass --unit')
         if timezone is not None:
-            raise ValueError('MSCONS input uses Europe/Berlin by default; do not pass --timezone')
-        dataset, mscons_audit = dataset_from_mscons(path, series_id=series_id, melo_id=getattr(args, 'melo_id', None), obis=getattr(args, 'obis', None), cci_code=getattr(args, 'cci_code', None), message_ref=getattr(args, 'message_ref', None), document_number=getattr(args, 'document_number', None), mscons_timezone=(getattr(args, 'mscons_timezone', None) or 'UTC'))
+            raise ValueError('MSCONS input uses --mscons-timezone for source timestamp interpretation; do not pass --timezone')
+        dataset, mscons_audit = dataset_from_mscons(path, series_id=series_id, melo_id=getattr(args, 'melo_id', None), obis=getattr(args, 'obis', None), cci_code=getattr(args, 'cci_code', None), message_ref=getattr(args, 'message_ref', None), document_number=getattr(args, 'document_number', None), mscons_timezone=(getattr(args, 'mscons_timezone', None) or 'Europe/Berlin'))
         if getattr(args, 'mscons_timezone', None):
             dataset['mscons_timezone'] = args.mscons_timezone
     else:
@@ -492,6 +532,55 @@ def expected_intervals_for_day(day: dt.date, timezone: str) -> int:
     start = dt.datetime.combine(day, dt.time(), zone).astimezone(UTC)
     stop = dt.datetime.combine(day + dt.timedelta(days=1), dt.time(), zone).astimezone(UTC)
     return int((stop - start).total_seconds() // 900)
+
+
+def local_day_grid(day: dt.date, timezone: str):
+    zone = ZoneInfo(timezone)
+    start = dt.datetime.combine(day, dt.time(), zone).astimezone(UTC)
+    stop = dt.datetime.combine(day + dt.timedelta(days=1), dt.time(), zone).astimezone(UTC)
+    stamps = []
+    current = start
+    while current < stop:
+        stamps.append(current)
+        current += dt.timedelta(minutes=15)
+    return stamps
+
+
+def information_cutoff(forecast_for: dt.date, timezone: str) -> dt.datetime:
+    zone = ZoneInfo(timezone)
+    # D-2 is the last allowed observed day; the first forbidden instant is local D-1 00:00.
+    return dt.datetime.combine(forecast_for - dt.timedelta(days=1), dt.time(), zone).astimezone(UTC)
+
+
+def forecast_horizon_check(predictions, truth, *, forecast_for: dt.date, timezone: str, allow_partial=False):
+    expected = set(local_day_grid(forecast_for, timezone))
+    predicted = set(predictions)
+    actual = set(truth)
+    missing_predictions = sorted(expected - predicted)
+    missing_actuals = sorted(expected - actual)
+    duplicate_count = len(predictions) - len(predicted) if hasattr(predictions, '__len__') else 0
+    outside_predictions = sorted(predicted - expected)
+    status = 'ok' if (allow_partial or (not missing_predictions and not missing_actuals and not outside_predictions and duplicate_count == 0)) else 'failed'
+    return {
+        'status': status,
+        'forecast_for': forecast_for.isoformat(),
+        'timezone': timezone,
+        'expected_intervals': len(expected),
+        'predicted_intervals': len(predicted),
+        'actual_intervals': len(actual & expected),
+        'missing_prediction_timestamps': [t.isoformat() for t in missing_predictions[:20]],
+        'missing_actual_timestamps': [t.isoformat() for t in missing_actuals[:20]],
+        'outside_prediction_timestamps': [t.isoformat() for t in outside_predictions[:20]],
+        'duplicate_prediction_count': duplicate_count,
+        'reason': None if status == 'ok' else 'forecast horizon incomplete or contains timestamps outside the requested horizon',
+    }
+
+
+def require_forecast_horizon(predictions, truth, *, forecast_for: dt.date, timezone: str, allow_partial=False):
+    check = forecast_horizon_check(predictions, truth, forecast_for=forecast_for, timezone=timezone, allow_partial=allow_partial)
+    if check['status'] != 'ok':
+        raise ValueError(check['reason'])
+    return check
 
 
 def quality_report(dataset, *, min_coverage=1.0, expected_intervals='auto', allow_gaps=False, allow_negative=False, policy='strict'):
@@ -545,11 +634,13 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Client:
-    def __init__(self, base_url: str, token: str | None = None, tenant_header: str | None = None, timeout: float = 120, debug_http: bool = False):
+    def __init__(self, base_url: str, token: str | None = None, tenant_header: str | None = None, timeout: float = 120, debug_http: bool = False, allow_insecure_http: bool = False):
         self.base = base_url.rstrip('/')
         split = urllib.parse.urlsplit(self.base)
         if split.scheme not in ('http', 'https') or not split.netloc or split.username or split.password or split.query or split.fragment:
             raise ValueError('Invalid API base URL; credentials do not belong in the URL')
+        if split.scheme == 'http' and not (allow_insecure_http or split.hostname in ('127.0.0.1', 'localhost', '::1')):
+            raise ValueError('HTTPS is required for API access unless --allow-insecure-http is used for a local/test endpoint')
         self.token = token or ''
         self.tenant_header = tenant_header
         self.timeout = timeout
@@ -639,7 +730,7 @@ def token_from(args):
 
 
 def client_for(args):
-    return Client(args.base_url, token_from(args), None, args.timeout, getattr(args, 'debug_http', False))
+    return Client(args.base_url, token_from(args), None, args.timeout, getattr(args, 'debug_http', False), getattr(args, 'allow_insecure_http', False))
 
 
 def resolved_child_path(root: Path, child: Path) -> Path:
@@ -963,21 +1054,28 @@ def metric_summary(pairs, *, expected_intervals=None):
     }, residuals
 
 
+def fmt_percent(value, digits=4):
+    return 'undefined' if value is None else f'{value:.{digits}f}%'
+
+
 def load_predictions(args):
-    predictions = {}; tenant = args.tenant_id
+    predictions = {}; tenant = args.tenant_id; forecast_for = None; forecast_timezone = None; row_count = 0
     for file in args.predictions:
         envelope = read_json(file)
         tenant = tenant or envelope.get('tenant_id')
         if envelope.get('tenant_id') and tenant and envelope.get('tenant_id') != tenant:
             raise ValueError('Prediction file belongs to another tenant')
         result = envelope['result']
+        forecast_for = forecast_for or (dt.date.fromisoformat(result['forecast_for']) if result.get('forecast_for') else None)
+        forecast_timezone = forecast_timezone or result.get('timezone')
         if result.get('series_id') and result.get('series_id') != args.series_id:
             raise ValueError('Prediction belongs to another series')
         for ts, val in prediction_rows(result):
+            row_count += 1
             if ts in predictions:
                 raise ValueError('Overlapping prediction files; choose one forecast per timestamp')
             predictions[ts] = val
-    return tenant, predictions
+    return tenant, predictions, forecast_for, forecast_timezone, row_count
 
 
 def actual_truth(args):
@@ -989,11 +1087,16 @@ def actual_truth(args):
 def cmd_score(args):
     fresh_out(args.out, getattr(args, 'resume_out', False))
     actual, audit, truth = actual_truth(args)
-    tenant, predictions = load_predictions(args)
+    tenant, predictions, forecast_for, forecast_timezone, prediction_row_count = load_predictions(args)
+    if prediction_row_count != len(predictions):
+        raise ValueError('Forecast contains duplicate timestamps')
+    if forecast_for is not None:
+        require_forecast_horizon(predictions, truth, forecast_for=forecast_for, timezone=forecast_timezone or actual['timezone'], allow_partial=args.allow_partial)
     matching = sorted(predictions.keys() & truth.keys())
     if not matching or (len(matching) != len(predictions) and not args.allow_partial):
         raise ValueError('Missing actual values; use --allow-partial only for an explicitly partial report')
-    metrics, residuals = metric_summary([(t, truth[t], predictions[t]) for t in matching], expected_intervals=len(predictions))
+    expected = expected_intervals_for_day(forecast_for, forecast_timezone or actual['timezone']) if forecast_for is not None and not args.allow_partial else len(predictions)
+    metrics, residuals = metric_summary([(t, truth[t], predictions[t]) for t in matching], expected_intervals=expected)
     metrics = {'tenant_id': tenant, 'series_id': args.series_id, 'unit': actual['unit'], **metrics, 'actual_source': audit}
     save_json(args.out / 'metrics.json', metrics)
     save_json(args.out / 'residuals.json', {'series_id': args.series_id, 'rows': residuals})
@@ -1028,24 +1131,38 @@ def normalize_baseline_name(name: str) -> str:
     return aliases[key]
 
 
-def baseline_prediction(ts: dt.datetime, history: dict, baseline: str, *, rolling_days: int = 7):
+def local_shift(ts: dt.datetime, days: int, timezone: str) -> dt.datetime:
+    zone = ZoneInfo(timezone)
+    local = ts.astimezone(zone)
+    shifted_date = local.date() - dt.timedelta(days=days)
+    naive = dt.datetime.combine(shifted_date, local.timetz().replace(tzinfo=None))
+    return localize_strict(naive, timezone).astimezone(UTC)
+
+
+def baseline_prediction(ts: dt.datetime, history: dict, baseline: str, *, rolling_days: int = 7, as_of: dt.datetime | None = None, timezone: str = 'Europe/Berlin'):
     baseline = normalize_baseline_name(baseline)
+
+    def available(reference):
+        if as_of is not None and reference >= as_of:
+            return None
+        return history.get(reference)
+
     if baseline == 'previous_day':
-        return history.get(ts - dt.timedelta(days=1))
+        return available(local_shift(ts, 1, timezone))
     if baseline == 'previous_week':
-        return history.get(ts - dt.timedelta(days=7))
+        return available(local_shift(ts, 7, timezone))
     if baseline == 'rolling_mean':
         values = []
-        for days in range(1, rolling_days + 1):
-            value = history.get(ts - dt.timedelta(days=days))
+        for days in range(2 if as_of is not None else 1, rolling_days + 1):
+            value = available(local_shift(ts, days, timezone))
             if value is not None:
                 values.append(value)
         return math.fsum(values) / len(values) if values else None
     raise ValueError('Unsupported baseline: ' + baseline)
 
 
-def benchmark_prediction(ts: dt.datetime, history: dict, benchmark: str):
-    return baseline_prediction(ts, history, benchmark)
+def benchmark_prediction(ts: dt.datetime, history: dict, benchmark: str, *, as_of=None, timezone='Europe/Berlin'):
+    return baseline_prediction(ts, history, benchmark, as_of=as_of, timezone=timezone)
 
 
 def acceptance_thresholds(profile: str):
@@ -1064,20 +1181,26 @@ def acceptance_thresholds(profile: str):
 def cmd_acceptance_test(args):
     fresh_out(args.out, getattr(args, 'resume_out', False))
     actual, audit, truth = actual_truth(args)
-    tenant, predictions = load_predictions(args)
+    tenant, predictions, forecast_for, forecast_timezone, prediction_row_count = load_predictions(args)
+    if prediction_row_count != len(predictions):
+        raise ValueError('Acceptance test requires unique prediction timestamps')
+    if forecast_for is not None:
+        require_forecast_horizon(predictions, truth, forecast_for=forecast_for, timezone=forecast_timezone or actual['timezone'])
     matching = sorted(predictions.keys() & truth.keys())
     if not matching or len(matching) != len(predictions):
         raise ValueError('Acceptance test requires complete actuals for every prediction timestamp')
-    model_metrics, residuals = metric_summary([(t, truth[t], predictions[t]) for t in matching], expected_intervals=len(predictions))
+    expected = expected_intervals_for_day(forecast_for, forecast_timezone or actual['timezone']) if forecast_for is not None else len(predictions)
+    model_metrics, residuals = metric_summary([(t, truth[t], predictions[t]) for t in matching], expected_intervals=expected)
 
     history, history_audit = load_dataset(args.history, args.series_id, args.unit, args.timezone, args=args)
     history_by_ts = {parse_stamp(r['timestamp']): finite_number(r['value']) for r in history['values']}
+    cutoff = information_cutoff(forecast_for, forecast_timezone or actual['timezone']) if forecast_for is not None else None
     benchmarks = {}
     benchmark_names = list(dict.fromkeys(list(args.benchmarks or []) + list(args.require_better_than or [])))
     for name in benchmark_names:
         pairs = []
         for t in matching:
-            value = benchmark_prediction(t, history_by_ts, name)
+            value = benchmark_prediction(t, history_by_ts, name, as_of=cutoff, timezone=forecast_timezone or actual['timezone'])
             if value is not None:
                 pairs.append((t, truth[t], value))
         if len(pairs) != len(matching):
@@ -1121,10 +1244,10 @@ def cmd_acceptance_test(args):
     save_json(args.out / 'acceptance_report.json', report)
     save_json(args.out / 'residuals.json', {'series_id': args.series_id, 'rows': residuals})
     write_residuals_csv(args.out / 'residuals.csv', residuals)
-    lines = [f"# Forecast acceptance — {args.series_id}", '', f"Status: {status}", f"Profile: {args.acceptance_profile}", f"Model WAPE: {model_metrics['wape_percent']:.4f}%", f"Model bias: {model_metrics['bias_percent']:.4f}%", '']
+    lines = [f"# Forecast acceptance — {args.series_id}", '', f"Status: {status}", f"Profile: {args.acceptance_profile}", f"Model WAPE: {fmt_percent(model_metrics['wape_percent'])}", f"Model bias: {fmt_percent(model_metrics['bias_percent'])}", '']
     for name, bm in benchmarks.items():
         if bm.get('status') == 'ok':
-            lines.append(f"- Benchmark {name}: WAPE {bm['wape_percent']:.4f}%")
+            lines.append(f"- Benchmark {name}: WAPE {fmt_percent(bm.get('wape_percent'))}")
         else:
             lines.append(f"- Benchmark {name}: {bm.get('status')} ({bm.get('sample_count')}/{bm.get('expected_intervals')})")
     lines.append('')
@@ -1135,13 +1258,13 @@ def cmd_acceptance_test(args):
     return 0 if status == 'pass' else 50
 
 
-def e2e_baseline_metrics(history_by_ts, truth, matching, baselines):
+def e2e_baseline_metrics(history_by_ts, truth, matching, baselines, *, as_of=None, timezone='Europe/Berlin'):
     baseline_metrics = {}
     for requested in baselines:
         name = normalize_baseline_name(requested)
         pairs = []
         for t in matching:
-            value = baseline_prediction(t, history_by_ts, name)
+            value = baseline_prediction(t, history_by_ts, name, as_of=as_of, timezone=timezone)
             if value is not None:
                 pairs.append((t, truth[t], value))
         if len(pairs) != len(matching):
@@ -1161,20 +1284,35 @@ def leakage_check(history_by_ts, truth):
     return {'status': 'ok' if ok else 'fail', 'last_history_timestamp': last_history.isoformat(), 'first_actual_timestamp': first_actual.isoformat(), 'reason': None if ok else 'actuals overlap with training/history window'}
 
 
-def history_days_before_d2(history_by_ts, forecast_for: dt.date, timezone: str, min_days: int):
+def training_window_check(history_by_ts, forecast_for: dt.date, timezone: str, min_days: int):
     zone = ZoneInfo(timezone)
-    cutoff = forecast_for - dt.timedelta(days=2)
-    observed_days = sorted({stamp.astimezone(zone).date() for stamp in history_by_ts if stamp.astimezone(zone).date() <= cutoff})
-    ok = len(observed_days) >= min_days
+    cutoff_date = forecast_for - dt.timedelta(days=2)
+    cutoff = information_cutoff(forecast_for, timezone)
+    observed_days = sorted({stamp.astimezone(zone).date() for stamp in history_by_ts if stamp < cutoff})
+    forbidden = sorted(stamp for stamp in history_by_ts if stamp >= cutoff)
+    enough = len([day for day in observed_days if day <= cutoff_date]) >= min_days
+    ok = enough and not forbidden
+    reason = None
+    if forbidden:
+        reason = 'history contains values after the D-2 information cutoff'
+    elif not enough:
+        reason = f'at least {min_days} observed history days required before D-2; missing history is not zero'
     return {
         'status': 'ok' if ok else 'fail',
         'min_required_days_before_d2': min_days,
-        'observed_days_before_d2': len(observed_days),
-        'cutoff_date': cutoff.isoformat(),
+        'observed_days_before_d2': len([day for day in observed_days if day <= cutoff_date]),
+        'cutoff_date': cutoff_date.isoformat(),
+        'information_cutoff': cutoff.isoformat(),
         'first_observed_date': observed_days[0].isoformat() if observed_days else None,
         'last_observed_date_before_d2': observed_days[-1].isoformat() if observed_days else None,
-        'reason': None if ok else f'at least {min_days} observed history days required before D-2; missing history is not zero',
+        'forbidden_after_cutoff_count': len(forbidden),
+        'first_forbidden_after_cutoff': forbidden[0].isoformat() if forbidden else None,
+        'reason': reason,
     }
+
+
+def history_days_before_d2(history_by_ts, forecast_for: dt.date, timezone: str, min_days: int):
+    return training_window_check(history_by_ts, forecast_for, timezone, min_days)
 
 
 def quality_gate(profile, forecast_metrics, baseline_metrics, *, max_wape=None, min_coverage=None, baseline_tolerance=0.0, require_baseline_delta=True):
@@ -1244,11 +1382,12 @@ def cmd_e2e(args):
     predict_job = client.call(ROOT + '/predict', predict_request, idempotency_key=predict_idem)
     forecast_result = await_result(client, predict_job, args)
     predictions = {ts: val for ts, val in prediction_rows(forecast_result)}
+    horizon = require_forecast_horizon(predictions, truth, forecast_for=args.forecast_for, timezone=actual['timezone'])
     matching = sorted(predictions.keys() & truth.keys())
     if not matching or len(matching) != len(predictions):
         raise ValueError('E2E requires complete actuals for every prediction timestamp')
-    forecast_metrics, residuals = metric_summary([(t, truth[t], predictions[t]) for t in matching], expected_intervals=len(predictions))
-    baseline_metrics = e2e_baseline_metrics(history_by_ts, truth, matching, args.baselines.split(','))
+    forecast_metrics, residuals = metric_summary([(t, truth[t], predictions[t]) for t in matching], expected_intervals=horizon['expected_intervals'])
+    baseline_metrics = e2e_baseline_metrics(history_by_ts, truth, matching, args.baselines.split(','), as_of=information_cutoff(args.forecast_for, history['timezone']), timezone=history['timezone'])
     gate = quality_gate(args.quality_profile, forecast_metrics, baseline_metrics, max_wape=args.max_wape, min_coverage=args.min_score_coverage, baseline_tolerance=args.baseline_tolerance, require_baseline_delta=not args.no_baseline_gate)
     manifest = {
         'tenant_id': tenant,
@@ -1261,6 +1400,7 @@ def cmd_e2e(args):
         'actual_quality': actual_quality,
         'leakage_check': leak,
         'history_window_check': history_window,
+        'forecast_horizon_check': horizon,
         'forecast_context': context,
         'history_result': uploaded,
         'train_result': train_result,
@@ -1276,6 +1416,7 @@ def cmd_e2e(args):
         'forecast_context': context,
         'leakage_check': leak,
         'history_window_check': history_window,
+        'forecast_horizon_check': horizon,
         'forecast_metrics': forecast_metrics,
         'baseline_metrics': baseline_metrics,
         'quality_gate': gate,
@@ -1287,10 +1428,10 @@ def cmd_e2e(args):
     save_json(args.out / 'e2e-summary.json', summary)
     save_json(args.out / 'residuals.json', {'series_id': history['series_id'], 'rows': residuals})
     write_residuals_csv(args.out / 'residuals.csv', residuals)
-    lines = [f"# Forecast E2E acceptance — {history['series_id']}", '', f"Status: {gate['status']}", f"Profile: {args.quality_profile}", f"Forecast WAPE: {forecast_metrics['wape_percent']:.4f}%", f"Coverage: {forecast_metrics['coverage']:.2%}", f"Leakage check: {leak['status']}", '']
+    lines = [f"# Forecast E2E acceptance — {history['series_id']}", '', f"Status: {gate['status']}", f"Profile: {args.quality_profile}", f"Forecast WAPE: {fmt_percent(forecast_metrics['wape_percent'])}", f"Coverage: {forecast_metrics['coverage']:.2%}", f"Leakage check: {leak['status']}", '']
     for name, bm in baseline_metrics.items():
         if bm.get('status') == 'ok':
-            lines.append(f"- Baseline {name}: WAPE {bm['wape_percent']:.4f}%")
+            lines.append(f"- Baseline {name}: WAPE {fmt_percent(bm.get('wape_percent'))}")
         else:
             lines.append(f"- Baseline {name}: {bm.get('status')} ({bm.get('sample_count')}/{bm.get('expected_intervals')})")
     lines.append('')
@@ -1310,7 +1451,7 @@ def cmd_doctor(args):
         split = urllib.parse.urlsplit(args.base_url)
         record('base_url', split.scheme in ('http', 'https') and bool(split.netloc), args.base_url)
         try:
-            openapi = Client(args.base_url, timeout=args.timeout).call('/api/openapi.json', method='GET')
+            openapi = Client(args.base_url, timeout=args.timeout, allow_insecure_http=getattr(args, 'allow_insecure_http', False)).call('/api/openapi.json', method='GET')
             paths = openapi.get('paths') or {}
             record('openapi', True, {'version': (openapi.get('info') or {}).get('version')})
             for route in (ROOT + '/history', ROOT + '/train', ROOT + '/predict'):
@@ -1322,7 +1463,7 @@ def cmd_doctor(args):
         else:
             record('token', False, 'No token supplied')
     finally:
-        ok = all(c['ok'] for c in checks if not c['name'].startswith('route:'))
+        ok = all(c['ok'] for c in checks)
         payload = {'status': 'ok' if ok else 'failed', 'checks': checks, 'base_url': args.base_url.rstrip('/')}
         save_json(args.out / 'doctor.json', payload)
         (args.out / 'doctor.md').write_text('# Cernion Forecast CLI Doctor\n\n' + '\n'.join(f"- {'OK' if c['ok'] else 'FAIL'} {c['name']}: {c.get('detail')}" for c in checks) + '\n', encoding='utf-8')
@@ -1342,11 +1483,14 @@ def cmd_batch_history(args):
     processed = failed = 0
     items = []
     for file in files:
+        step = 'prepare'
         try:
+            step = 'read_input'
             payload = read_json(file) if file.suffix.lower() == '.json' else None
             sid = payload.get(args.series_id_field) if isinstance(payload, dict) else None
             sid = sid or getattr(args, 'series_id', None) or file.stem
             item_out = args.out / file.stem
+            step = 'history_import'
             child = argparse.Namespace(**vars(args))
             child.input = file
             child.series_id = sid
@@ -1355,12 +1499,12 @@ def cmd_batch_history(args):
             child.stdout_json = False
             child.unit = getattr(args, 'unit', None)
             child.timezone = getattr(args, 'timezone', None)
-            child.allow_corrections = False
-            child.historical_import = False
-            child.import_mode = 'append-only'
-            child.processed_ledger = None
-            child.idempotency_key = None
-            child.skip_if_processed = False
+            child.allow_corrections = getattr(args, 'allow_corrections', False)
+            child.historical_import = getattr(args, 'historical_import', False)
+            child.import_mode = getattr(args, 'import_mode', 'append-only')
+            child.processed_ledger = getattr(args, 'processed_ledger', None)
+            child.idempotency_key = getattr(args, 'idempotency_key', None)
+            child.skip_if_processed = getattr(args, 'skip_if_processed', False)
             rc = cmd_history_like(child, train_after=False)
             rc = rc if isinstance(rc, int) else 0
             if rc == 0:
@@ -1368,8 +1512,13 @@ def cmd_batch_history(args):
             else:
                 failed += 1; status = 'failed'
         except Exception as error:
-            failed += 1; status = 'failed'; rc = 1
-        items.append({'file': str(file), 'status': status, 'exit_code': rc})
+            failed += 1; status = 'failed'; rc = 1; error_detail = {'step': step, 'type': type(error).__name__, 'message': str(error), 'retryable': isinstance(error, (ConnectionError, TimeoutError, urllib.error.URLError))}
+        else:
+            error_detail = None
+        item = {'file': str(file), 'status': status, 'exit_code': rc, 'step': step}
+        if error_detail:
+            item['error'] = error_detail
+        items.append(item)
     summary = {'status': 'ok' if failed == 0 else 'failed', 'processed': processed, 'failed': failed, 'items': items}
     save_json(args.out / 'summary.json', summary)
     return 0 if failed == 0 else 1
@@ -1383,12 +1532,45 @@ def cmd_batch(args):
     results = []
     for index, item in enumerate(items):
         item_out = args.out / f"item-{index+1:04d}-{item.get('series_id','series')}"
-        argv = ['history', '--tenant-id', manifest.get('tenant_id') or args.tenant_id or '', '--series-id', item['series_id'], '--input', item['input'], '--out', str(item_out)]
-        if item.get('weather_region'): argv += ['--weather-region', item['weather_region']]
-        if item.get('melo_id'): argv += ['--melo-id', item['melo_id']]
-        if item.get('obis'): argv += ['--obis', item['obis']]
-        rc = main([x for x in argv if x != ''])
-        results.append({'index': index, 'series_id': item.get('series_id'), 'status': 'ok' if rc == 0 else 'failed', 'exit_code': rc, 'out': str(item_out)})
+        step = 'history_import'
+        try:
+            child = argparse.Namespace(**vars(args))
+            child.input = Path(item['input'])
+            child.series_id = item['series_id']
+            child.tenant_id = item.get('tenant_id') or manifest.get('tenant_id') or args.tenant_id
+            child.out = item_out
+            child.output_format = item.get('output_format') or 'json'
+            child.stdout_json = False
+            child.unit = item.get('unit')
+            child.timezone = item.get('timezone')
+            child.weather_region = item.get('weather_region') or getattr(args, 'weather_region', None)
+            child.location = item.get('location') or getattr(args, 'location', None)
+            child.weather_dataset_id = item.get('weather_dataset_id') or getattr(args, 'weather_dataset_id', None)
+            child.context_dataset_id = item.get('context_dataset_id') or getattr(args, 'context_dataset_id', None)
+            child.postal_code = item.get('postal_code') or getattr(args, 'postal_code', None)
+            child.municipality = item.get('municipality') or getattr(args, 'municipality', None)
+            child.country = item.get('country') or getattr(args, 'country', None)
+            child.latitude = item.get('latitude') or getattr(args, 'latitude', None)
+            child.longitude = item.get('longitude') or getattr(args, 'longitude', None)
+            child.melo_id = item.get('melo_id') or getattr(args, 'melo_id', None)
+            child.obis = item.get('obis') or getattr(args, 'obis', None)
+            child.cci_code = item.get('cci_code') or getattr(args, 'cci_code', None)
+            child.message_ref = item.get('message_ref') or getattr(args, 'message_ref', None)
+            child.document_number = item.get('document_number') or getattr(args, 'document_number', None)
+            child.mscons_timezone = item.get('mscons_timezone') or getattr(args, 'mscons_timezone', None)
+            child.allow_corrections = item.get('allow_corrections', getattr(args, 'allow_corrections', False))
+            child.historical_import = item.get('historical_import', getattr(args, 'historical_import', False))
+            child.import_mode = item.get('import_mode', getattr(args, 'import_mode', 'append-only'))
+            child.processed_ledger = None
+            child.idempotency_key = item.get('idempotency_key')
+            child.skip_if_processed = False
+            rc = cmd_history_like(child, train_after=False)
+            rc = rc if isinstance(rc, int) else 0
+            result = {'index': index, 'series_id': item.get('series_id'), 'status': 'ok' if rc == 0 else 'failed', 'exit_code': rc, 'out': str(item_out), 'step': step}
+        except Exception as error:
+            rc = 1
+            result = {'index': index, 'series_id': item.get('series_id'), 'status': 'failed', 'exit_code': rc, 'out': str(item_out), 'step': step, 'error': {'type': type(error).__name__, 'message': str(error), 'retryable': isinstance(error, (ConnectionError, TimeoutError, urllib.error.URLError))}}
+        results.append(result)
         if rc != 0 and not args.continue_on_error:
             break
     summary = {'status': 'ok' if all(r['exit_code'] == 0 for r in results) else 'failed', 'items': results}
@@ -1417,6 +1599,7 @@ def add_common(sub, token=True):
     sub.add_argument('--quiet', action='store_true')
     sub.add_argument('--resume-out', action='store_true')
     sub.add_argument('--debug-http', action='store_true', help='Log sanitized request/response metadata for HTTP diagnostics')
+    sub.add_argument('--allow-insecure-http', action='store_true', help='Allow non-HTTPS API base URLs for explicit local/test usage')
     if token:
         sub.add_argument('--token-file', type=Path)
         sub.add_argument('--poll-interval', type=float, default=5)
@@ -1432,8 +1615,8 @@ def add_output_args(sub):
 
 
 def add_quality_args(sub):
-    sub.add_argument('--quality-policy', choices=['strict', 'warn', 'lenient'], default='lenient')
-    sub.add_argument('--min-coverage', type=float, default=0.0)
+    sub.add_argument('--quality-policy', choices=['strict', 'warn', 'lenient'], default='strict')
+    sub.add_argument('--min-coverage', type=float, default=1.0)
     sub.add_argument('--expected-intervals', default='auto')
     sub.add_argument('--allow-gaps', action='store_true')
     sub.add_argument('--allow-negative', action='store_true')
@@ -1515,9 +1698,13 @@ def build_parser():
     e2e.set_defaults(func=cmd_e2e)
 
     bh = sub.add_parser('batch-history'); add_common(bh); add_quality_args(bh); add_context_args(bh); add_mscons_select_args(bh)
-    bh.add_argument('--input-dir', type=Path, required=True); bh.add_argument('--glob', default='*'); bh.add_argument('--series-id-field', default='series_id'); bh.set_defaults(func=cmd_batch_history)
+    bh.add_argument('--input-dir', type=Path, required=True); bh.add_argument('--glob', default='*'); bh.add_argument('--series-id-field', default='series_id')
+    bh.add_argument('--allow-corrections', action='store_true'); bh.add_argument('--historical-import', action='store_true'); bh.add_argument('--import-mode', choices=['append-only', 'correction', 'replace-period'], default='append-only')
+    bh.add_argument('--processed-ledger', type=Path); bh.add_argument('--idempotency-key'); bh.add_argument('--skip-if-processed', action='store_true'); bh.set_defaults(func=cmd_batch_history)
     doctor = sub.add_parser('doctor'); add_common(doctor); doctor.set_defaults(func=cmd_doctor)
-    batch = sub.add_parser('batch'); add_common(batch); batch.add_argument('--manifest', type=Path, required=True); batch.add_argument('--continue-on-error', action='store_true'); batch.set_defaults(func=cmd_batch)
+    batch = sub.add_parser('batch'); add_common(batch); add_quality_args(batch); add_context_args(batch); add_mscons_select_args(batch)
+    batch.add_argument('--manifest', type=Path, required=True); batch.add_argument('--continue-on-error', action='store_true')
+    batch.add_argument('--allow-corrections', action='store_true'); batch.add_argument('--historical-import', action='store_true'); batch.add_argument('--import-mode', choices=['append-only', 'correction', 'replace-period'], default='append-only'); batch.set_defaults(func=cmd_batch)
     describe = sub.add_parser('describe'); describe.set_defaults(func=cmd_describe)
     return p
 
