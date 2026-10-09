@@ -21,7 +21,14 @@ D-1 and D are not counted
 missing history is not zero
 ```
 
-The command also enforces the information boundary: the history uploaded for training must not contain any timestamps at or after local `D-1 00:00`. The computed `information_cutoff` and any rejection reason are written to the E2E manifest/summary.
+The command also enforces the information boundary on two independent axes:
+
+- `event_time` / `timestamp` must be before the local D-1 cutoff for D-2 forecasting.
+- `available_at` must be less than or equal to the run's `as_of` timestamp.
+
+A value measured before D-2 but first available after `as_of` is rejected for point-in-time backtesting. If historical input lacks `available_at`, `e2e` fails by default. Operators must either provide evidence timestamps or explicitly choose `--availability-mode event-time|ingested-at|assume-event-time|assume-ingested`; the selected mode is recorded in `integrity_receipt.json`.
+
+The computed `information_cutoff`, `as_of`, availability gate and any rejection reason are written to the E2E manifest/summary and receipt.
 
 The default preflight is:
 
@@ -60,6 +67,7 @@ Use the profile that matches the operational decision, not the profile that make
 `e2e` writes:
 
 - `run_manifest.json`
+- `integrity_receipt.json`
 - `prediction_result.json`
 - `baseline_metrics.json`
 - `quality_gate.json`
@@ -81,5 +89,6 @@ cernion-forecast e2e \
   --quality-profile portfolio \
   --baselines previous-week,rolling-mean \
   --min-observed-history-days 28 \
+  --availability-mode verified \
   --out runs/meter-42-e2e
 ```

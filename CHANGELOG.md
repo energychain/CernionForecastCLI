@@ -6,6 +6,16 @@ The project follows semantic-versioning intent. Before `1.0.0`, command names an
 
 ## [Unreleased]
 
+### Added
+
+- Added executable availability semantics for point-in-time backtests: `event_time`, `available_at`, `ingested_at` and `as_of` are separate concepts; `e2e` rejects missing availability proof unless an explicit `--availability-mode` is selected and materializes the latest value version available at `as_of`.
+- Added `integrity_receipt.json` as a versioned machine-readable `CET-FC-DIC-001` evidence receipt for E2E runs, linked to import, training, prediction, horizon, quality and gate artifacts.
+- Added JSON Schemas under `docs/schemas/` for canonical time series, information cutoff, integrity receipt and validation errors.
+
+### Fixed
+
+- `--allow-partial` no longer accepts forecasts with duplicate timestamps or predictions outside the expected horizon; it only tolerates missing values.
+
 ### Documentation
 
 - Added `docs/data-integrity-contract.md` as the binding proposed fachliche data-integrity contract (`CET-FC-DIC-001`) for CernionForecastCLI, CET Forecast API and forecast validation work. The contract is explicitly `Proposed / Nicht freigegeben`; implementations may only claim conformance to implemented and tested parts until section 14 is resolved.

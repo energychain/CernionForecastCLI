@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://energychain.github.io/CernionForecastCLI/schemas/canonical-timeseries.schema.json",
+  "title": "Cernion Forecast Canonical Time Series",
+  "type": "object",
+  "required": ["series_id", "unit", "timezone", "values"],
+  "additionalProperties": true,
+  "properties": {
+    "tenant_id": {"type": "string"},
+    "series_id": {"type": "string", "minLength": 1},
+    "series_type": {"type": "string"},
+    "measurement_semantics": {"type": "string"},
+    "value_semantics": {"enum": ["interval_energy", "average_power", null]},
+    "unit": {"enum": ["kWh", "kW"]},
+    "timezone": {"type": "string", "minLength": 1},
+    "period_from": {"type": "string", "format": "date"},
+    "period_until": {"type": "string", "format": "date"},
+    "source": {"type": "object"},
+    "source_envelope": {"type": "object"},
+    "values": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["timestamp", "value"],
+        "additionalProperties": true,
+        "properties": {
+          "timestamp": {"type": "string", "format": "date-time", "description": "Event/observation timestamp on the operational time grid."},
+          "event_time": {"type": "string", "format": "date-time", "description": "Explicit event/observation timestamp; defaults to timestamp."},
+          "available_at": {"type": "string", "format": "date-time", "description": "Earliest time this value version was available for the forecast decision."},
+          "ingested_at": {"type": "string", "format": "date-time", "description": "Time this value version was ingested by the integration system/CLI."},
+          "value": {"type": "number"},
+          "quality": {"type": "string"}
+        }
+      }
+    }
+  }
+}

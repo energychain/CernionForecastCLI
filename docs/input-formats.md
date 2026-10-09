@@ -17,8 +17,8 @@ Use dataset JSON when you can export structured interval values from an EDM, bil
     "context_dataset_id": "optional-source-id"
   },
   "values": [
-    {"timestamp": "2026-09-24T00:00:00+02:00", "value": 1.25},
-    {"timestamp": "2026-09-24T00:15:00+02:00", "value": 1.30}
+    {"timestamp": "2026-09-24T00:00:00+02:00", "available_at": "2026-09-24T01:00:00+02:00", "value": 1.25},
+    {"timestamp": "2026-09-24T00:15:00+02:00", "available_at": "2026-09-24T01:00:00+02:00", "value": 1.30}
   ]
 }
 ```
@@ -29,6 +29,8 @@ Rules:
 - `unit` is `kWh` or `kW`.
 - `timezone` names the local timezone used for quality reports.
 - Timestamps must carry an explicit UTC offset.
+- `timestamp`/`event_time` describes the observation interval; `available_at` describes when this value version was available for the forecast decision; `ingested_at` describes technical ingestion. They are separate concepts.
+- Historical backtests reject missing availability proof unless an explicit `--availability-mode` is chosen.
 - Values are quarter-hour interval values.
 - Missing values are absent, not zero-filled.
 - Productive quality defaults are strict: daily coverage is expected to be complete unless you explicitly choose `--quality-policy warn|lenient`, lower `--min-coverage`, or allow gaps for exploratory/local tests.

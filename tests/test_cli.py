@@ -549,6 +549,7 @@ class CLITests(unittest.TestCase):
                     '--baselines', 'previous-week', '--max-wape', '10',
                     '--baseline-tolerance', '1.0', '--location', 'Berlin',
                     '--weather-region', 'DE-BE-Berlin', '--min-observed-history-days', '0',
+                    '--availability-mode', 'assume-event-time',
                     '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890'}
                 )
                 self.assertEqual(p.returncode, 0, p.stderr)
@@ -566,8 +567,90 @@ class CLITests(unittest.TestCase):
                 self.assertTrue(any(path.endswith('/history') for path in paths))
                 self.assertTrue(any(path.endswith('/train') for path in paths))
                 self.assertTrue(any(path.endswith('/predict') for path in paths))
+                receipt = json.loads((out / 'integrity_receipt.json').read_text())
+                self.assertEqual(receipt['contract_id'], 'CET-FC-DIC-001')
+                self.assertEqual(receipt['status'], 'pass')
+                self.assertEqual(receipt['gates']['availability']['status'], 'ok')
+                self.assertEqual(receipt['links']['run_manifest'], 'run_manifest.json')
         finally:
             api.close()
+
+    def test_e2e_requires_explicit_availability_mode_when_evidence_is_missing(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                history = tmp / 'history.json'
+                actuals = tmp / 'actuals.json'
+                history.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [
+                    {'timestamp': '2026-09-21T00:00:00+02:00', 'value': 12.0},
+                ]}))
+                actuals.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-28T00:00:00+02:00', 'value': 10.0}]}))
+                p = run_cli('e2e', '--base-url', api.url, '--series-id', 'meter-a', '--history', str(history), '--actuals', str(actuals), '--forecast-for', '2026-09-28', '--quality-policy', 'lenient', '--min-observed-history-days', '0', '--out', str(tmp / 'e2e'), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
+                self.assertEqual(p.returncode, 1)
+                self.assertIn('availability evidence missing', p.stderr)
+                self.assertFalse(api.calls)
+        finally:
+            api.close()
+
+    def test_e2e_rejects_values_available_after_as_of_before_api_calls(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                history = tmp / 'history.json'
+                actuals = tmp / 'actuals.json'
+                history.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [
+                    {'timestamp': '2026-09-21T00:00:00+02:00', 'available_at': '2026-09-27T08:00:00+02:00', 'value': 12.0},
+                ]}))
+                actuals.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-28T00:00:00+02:00', 'value': 10.0}]}))
+                p = run_cli('e2e', '--base-url', api.url, '--series-id', 'meter-a', '--history', str(history), '--actuals', str(actuals), '--forecast-for', '2026-09-28', '--quality-policy', 'lenient', '--min-observed-history-days', '0', '--out', str(tmp / 'e2e'), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
+                self.assertEqual(p.returncode, 1)
+                self.assertIn('available after as_of', p.stderr)
+                self.assertFalse(api.calls)
+        finally:
+            api.close()
+
+    def test_e2e_uses_latest_value_available_as_of_for_historical_corrections(self):
+        api = FakeAPI()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                history = tmp / 'history.json'
+                actuals = tmp / 'actuals.json'
+                history_values = []
+                for day in range(1, 29):
+                    history_values.append({'timestamp': f'2026-08-{day:02d}T00:00:00+02:00', 'available_at': f'2026-08-{day:02d}T01:00:00+02:00', 'value': 9.0})
+                history_values.extend([
+                    {'timestamp': '2026-09-21T00:00:00+02:00', 'available_at': '2026-09-21T01:00:00+02:00', 'value': 10.0},
+                    {'timestamp': '2026-09-21T00:00:00+02:00', 'available_at': '2026-09-25T01:00:00+02:00', 'value': 11.0},
+                    {'timestamp': '2026-09-21T00:00:00+02:00', 'available_at': '2026-09-27T01:00:00+02:00', 'value': 99.0},
+                ])
+                history.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': history_values}))
+                actuals.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': f'2026-09-28T{hh:02d}:{mm:02d}:00+02:00', 'value': 10.0} for hh in range(24) for mm in (0, 15, 30, 45)]}))
+                out = tmp / 'e2e'
+                p = run_cli('e2e', '--base-url', api.url, '--series-id', 'meter-a', '--history', str(history), '--actuals', str(actuals), '--forecast-for', '2026-09-28', '--quality-policy', 'lenient', '--quality-profile', 'system-load', '--baselines', 'previous-week', '--max-wape', '10', '--no-baseline-gate', '--min-observed-history-days', '0', '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
+                self.assertEqual(p.returncode, 0, p.stderr)
+                history_post = [c for c in api.calls if c[1].endswith('/history')][0][2]
+                uploaded = {row['timestamp']: row['value'] for row in history_post['dataset']['values']}
+                self.assertEqual(uploaded['2026-09-20T22:00:00+00:00'], 11.0)
+                receipt = json.loads((out / 'integrity_receipt.json').read_text())
+                self.assertEqual(receipt['gates']['availability']['selected_corrections'], 1)
+                self.assertEqual(receipt['gates']['availability']['rejected_after_as_of'], 1)
+        finally:
+            api.close()
+
+    def test_allow_partial_does_not_accept_outside_or_duplicate_predictions(self):
+        sys.path.insert(0, str(ROOT / 'src'))
+        from cernion_forecast_cli.cli import forecast_horizon_check, parse_stamp
+        predictions = {
+            parse_stamp('2026-09-28T00:00:00+02:00'): 1.0,
+            parse_stamp('2026-09-29T00:00:00+02:00'): 2.0,
+        }
+        truth = {parse_stamp('2026-09-28T00:00:00+02:00'): 1.0}
+        check = forecast_horizon_check(predictions, truth, forecast_for=__import__('datetime').date(2026, 9, 28), timezone='Europe/Berlin', allow_partial=True)
+        self.assertEqual(check['status'], 'failed')
+        self.assertTrue(check['outside_prediction_timestamps'])
 
     def test_e2e_rejects_insufficient_observed_history_before_api_calls(self):
         api = FakeAPI()
@@ -736,6 +819,51 @@ class CLITests(unittest.TestCase):
             self.assertEqual(p.returncode, 50, p.stderr)
             report = (tmp / 'accept' / 'acceptance_report.md').read_text()
             self.assertIn('Model WAPE: undefined', report)
+
+
+    def test_forecast_horizon_allow_partial_rejects_outside_predictions(self):
+        sys.path.insert(0, str(ROOT / 'src'))
+        from cernion_forecast_cli.cli import forecast_horizon_check, parse_stamp
+        predictions = {
+            parse_stamp('2026-09-28T00:00:00+02:00'): 1.0,
+            parse_stamp('2026-09-29T00:00:00+02:00'): 2.0,
+        }
+        truth = {parse_stamp('2026-09-28T00:00:00+02:00'): 1.0}
+        check = forecast_horizon_check(predictions, truth, forecast_for=__import__('datetime').date(2026, 9, 28), timezone='Europe/Berlin', allow_partial=True)
+        self.assertEqual(check['status'], 'failed')
+        self.assertIn('2026-09-28T22:00:00+00:00', check['outside_prediction_timestamps'])
+
+    def test_information_availability_requires_available_at_or_explicit_mode(self):
+        sys.path.insert(0, str(ROOT / 'src'))
+        from cernion_forecast_cli.cli import information_availability_check, parse_stamp
+        dataset = {'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-26T00:00:00+02:00', 'value': 1.0}]}
+        with self.assertRaisesRegex(ValueError, 'availability proof missing'):
+            information_availability_check(dataset, as_of=parse_stamp('2026-09-27T00:00:00+02:00'), mode='reject-missing')
+        check = information_availability_check(dataset, as_of=parse_stamp('2026-09-27T00:00:00+02:00'), mode='event-time')
+        self.assertEqual(check['status'], 'ok')
+        self.assertEqual(check['availability_source_counts']['event_time_assumption'], 1)
+
+    def test_information_availability_rejects_late_available_value(self):
+        sys.path.insert(0, str(ROOT / 'src'))
+        from cernion_forecast_cli.cli import information_availability_check, parse_stamp
+        dataset = {'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-26T00:00:00+02:00', 'available_at': '2026-09-28T12:00:00+02:00', 'value': 1.0}]}
+        check = information_availability_check(dataset, as_of=parse_stamp('2026-09-27T00:00:00+02:00'), mode='reject-missing')
+        self.assertEqual(check['status'], 'fail')
+        self.assertEqual(check['failures'][0]['code'], 'available_after_as_of')
+
+    def test_history_dry_run_writes_integrity_receipt_with_availability_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            history = tmp / 'history.json'
+            history.write_text(json.dumps({'series_id': 'meter-a', 'unit': 'kWh', 'timezone': 'Europe/Berlin', 'values': [{'timestamp': '2026-09-26T00:00:00+02:00', 'available_at': '2026-09-26T01:00:00+02:00', 'value': 1.0}]}))
+            p = run_cli('history', '--dry-run', '--tenant-id', 'tenant-a', '--input', str(history), '--as-of', '2026-09-27T00:00:00+02:00', '--out', str(tmp / 'out'), '--quality-policy', 'lenient')
+            self.assertEqual(p.returncode, 0, p.stderr)
+            receipt = json.loads((tmp / 'out' / 'integrity_receipt.json').read_text())
+            self.assertEqual(receipt['contract_id'], 'CET-FC-DIC-001')
+            self.assertEqual(receipt['receipt_schema_version'], 'cernion.forecast.integrity-receipt.v1')
+            self.assertIn('availability', receipt['gates'])
+            run = json.loads((tmp / 'out' / 'run.json').read_text())
+            self.assertEqual(run['integrity_receipt']['path'], 'integrity_receipt.json')
 
 
 if __name__ == '__main__':

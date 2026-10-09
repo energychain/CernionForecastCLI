@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://energychain.github.io/CernionForecastCLI/schemas/information-cutoff.schema.json",
+  "title": "Cernion Forecast Information Cutoff",
+  "type": "object",
+  "required": ["forecast_for", "timezone", "as_of", "information_cutoff", "availability_mode"],
+  "additionalProperties": false,
+  "properties": {
+    "forecast_for": {"type": "string", "format": "date"},
+    "timezone": {"type": "string", "minLength": 1},
+    "as_of": {"type": "string", "format": "date-time"},
+    "information_cutoff": {"type": "string", "format": "date-time"},
+    "availability_mode": {"enum": ["reject-missing", "verified", "event-time", "assume-event-time", "ingested-at", "assume-ingested"]},
+    "policy": {"type": "string"}
+  }
+}

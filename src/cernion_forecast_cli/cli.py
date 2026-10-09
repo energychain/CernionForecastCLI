@@ -484,7 +484,11 @@ def load_dataset(path: Path | str, series_id: str | None = None, unit: str | Non
             for row in reader:
                 ts = row.get('timestamp') or row.get('ts')
                 value = row.get('value')
-                rows.append({'timestamp': ts, 'value': finite_number(float(value))})
+                row_out = {'timestamp': ts, 'value': finite_number(float(value))}
+                for extra in ('event_time', 'available_at', 'ingested_at'):
+                    if row.get(extra):
+                        row_out[extra] = row.get(extra)
+                rows.append(row_out)
         dataset = {'series_id': series_id, 'unit': unit, 'timezone': timezone, 'values': rows}
     elif suffix in MSCONS_SUFFIXES:
         if unit is not None:
@@ -507,17 +511,19 @@ def load_dataset(path: Path | str, series_id: str | None = None, unit: str | Non
     if dataset.get('value_semantics') not in (None, 'interval_energy', 'average_power'):
         raise ValueError('Convert cumulative register readings to interval values before import')
     seen = set()
+    allow_duplicate_events = bool(getattr(args, 'allow_versioned_values', False))
     allow_negative = bool(getattr(args, 'allow_negative', False))
     for row in dataset.get('values') or []:
         ts = row.get('timestamp') or row.get('ts')
         t = parse_stamp(ts)
-        if t in seen:
+        if t in seen and not allow_duplicate_events:
             raise ValueError('Duplicate actual timestamp')
         seen.add(t)
         val = row.get('value')
         finite_number(val) if allow_negative else finite_nonnegative(val)
         if 'ts' in row and 'timestamp' not in row:
             row['timestamp'] = row.pop('ts')
+        row.setdefault('event_time', row['timestamp'])
     if not seen:
         raise ValueError('Dataset is empty')
     zone = ZoneInfo(dataset['timezone'])
@@ -560,7 +566,7 @@ def forecast_horizon_check(predictions, truth, *, forecast_for: dt.date, timezon
     missing_actuals = sorted(expected - actual)
     duplicate_count = len(predictions) - len(predicted) if hasattr(predictions, '__len__') else 0
     outside_predictions = sorted(predicted - expected)
-    status = 'ok' if (allow_partial or (not missing_predictions and not missing_actuals and not outside_predictions and duplicate_count == 0)) else 'failed'
+    status = 'ok' if ((not outside_predictions and duplicate_count == 0) and (allow_partial or (not missing_predictions and not missing_actuals))) else 'failed'
     return {
         'status': status,
         'forecast_for': forecast_for.isoformat(),
@@ -868,10 +874,18 @@ def cmd_history_like(args, train_after=False):
     fresh_out(args.out, getattr(args, 'resume_out', False))
     dataset, audit = load_dataset(args.input, args.series_id, args.unit, args.timezone, args=args)
     quality = enforce_quality(dataset, args, args.out)
+    as_of = getattr(args, 'as_of', None)
+    availability = None
+    if as_of is not None:
+        availability = information_availability_check(dataset, as_of=as_of, mode=getattr(args, 'availability_mode', 'reject-missing'), information_cutoff_value=as_of)
+        if availability['status'] != 'ok':
+            raise ValueError('Information availability gate failed: ' + str(availability['failures'][:3]))
     context = apply_location_context(dataset, args)
     state = state_base(args, 'enroll' if train_after else 'history')
     state['inputs'] = [audit]
     state['quality'] = quality
+    if availability:
+        state['information_availability'] = availability
     dataset_provenance = provenance_from_dataset(dataset)
     input_provenance = [dataset_provenance] if dataset_provenance else []
     if input_provenance:
@@ -903,6 +917,12 @@ def cmd_history_like(args, train_after=False):
         return 10
     if args.dry_run:
         state['status'] = 'dry_run'
+        receipt_gates = [integrity_gate('quality_report', quality)]
+        if availability:
+            receipt_gates.append(integrity_gate('information_availability', availability))
+        receipt = build_integrity_receipt(operation=state['operation'], tenant_id=state.get('tenant_id'), series_id=dataset['series_id'], as_of=as_of, information_cutoff_value=as_of, artifacts={'run': {'path': 'run.json'}, 'quality_report': {'path': 'quality_report.json'}}, gates=receipt_gates, links={'run': 'run.json', 'quality_report': 'quality_report.json'})
+        save_integrity_receipt(args.out, receipt)
+        state['integrity_receipt'] = {'path': 'integrity_receipt.json', 'sha256': receipt['receipt_hash']}
         save_json(args.out / 'run.json', state)
         print('Plan validated without HTTP: ' + str(args.out / 'run.json'))
         return
@@ -912,8 +932,15 @@ def cmd_history_like(args, train_after=False):
     uploaded = client.call(ROOT + '/history', history_payload, idempotency_key=history_idem)
     state['uploads'].append(uploaded)
     if not train_after:
-        state['status'] = 'completed'; save_json(args.out / 'run.json', state)
-        result_envelope = {'tenant_id': tenant, 'base_url': client.base, 'result': uploaded, 'client_run_id': history_idem, 'quality': quality}
+        state['status'] = 'completed'
+        receipt_gates = [integrity_gate('quality_report', quality)]
+        if availability:
+            receipt_gates.append(integrity_gate('information_availability', availability))
+        receipt = build_integrity_receipt(operation=state['operation'], tenant_id=tenant, series_id=dataset['series_id'], as_of=as_of, information_cutoff_value=as_of, artifacts={'run': {'path': 'run.json'}, 'result': {'path': 'result.json'}, 'quality_report': {'path': 'quality_report.json'}}, gates=receipt_gates, links={'data_import': 'result.json', 'quality_report': 'quality_report.json'})
+        save_integrity_receipt(args.out, receipt)
+        state['integrity_receipt'] = {'path': 'integrity_receipt.json', 'sha256': receipt['receipt_hash']}
+        save_json(args.out / 'run.json', state)
+        result_envelope = {'tenant_id': tenant, 'base_url': client.base, 'result': uploaded, 'client_run_id': history_idem, 'quality': quality, 'integrity_receipt': state['integrity_receipt']}
         if input_provenance:
             result_envelope['input_provenance'] = input_provenance
             result_envelope['source_provenance'] = source_provenance(input_provenance)
@@ -936,7 +963,14 @@ def cmd_history_like(args, train_after=False):
             result_envelope['result']['input_provenance'] = input_provenance
             result_envelope['result']['source_provenance'] = source_provenance(input_provenance)
     emit_result(args, result_envelope)
-    state['status'] = 'completed'; save_json(args.out / 'run.json', state)
+    state['status'] = 'completed'
+    receipt_gates = [integrity_gate('quality_report', quality)]
+    if availability:
+        receipt_gates.append(integrity_gate('information_availability', availability))
+    receipt = build_integrity_receipt(operation=state['operation'], tenant_id=tenant, series_id=dataset['series_id'], as_of=as_of, information_cutoff_value=as_of, artifacts={'run': {'path': 'run.json'}, 'result': {'path': 'result.json'}, 'quality_report': {'path': 'quality_report.json'}}, gates=receipt_gates, links={'data_import': 'run.json', 'training': 'result.json', 'quality_report': 'quality_report.json'})
+    save_integrity_receipt(args.out, receipt)
+    state['integrity_receipt'] = {'path': 'integrity_receipt.json', 'sha256': receipt['receipt_hash']}
+    save_json(args.out / 'run.json', state)
     ledger_append(getattr(args, 'processed_ledger', None), history_idem, {'status': 'completed', 'series_id': dataset['series_id']})
     print('Completed: ' + str(args.out / 'result.json'))
 
@@ -1311,6 +1345,213 @@ def training_window_check(history_by_ts, forecast_for: dt.date, timezone: str, m
     }
 
 
+
+def parse_optional_stamp(value, field: str, row_ts: str | None = None):
+    if value in (None, ''):
+        return None
+    try:
+        return parse_stamp(value)
+    except Exception as error:
+        where = f' for row {row_ts}' if row_ts else ''
+        raise ValueError(f'{field}{where} must be an ISO timestamp with offset on a PT15M grid') from error
+
+
+def row_event_time(row):
+    return parse_stamp(row.get('event_time') or row.get('timestamp') or row.get('ts'))
+
+
+def resolve_available_at(row, *, mode: str):
+    aliases = {'assume-event-time': 'event-time', 'assume-ingested': 'ingested-at', 'verified': 'reject-missing'}
+    mode = aliases.get(mode, mode)
+    event = row_event_time(row)
+    available = parse_optional_stamp(row.get('available_at'), 'available_at', row.get('timestamp') or row.get('ts'))
+    ingested = parse_optional_stamp(row.get('ingested_at'), 'ingested_at', row.get('timestamp') or row.get('ts'))
+    if available is not None:
+        source = 'available_at'
+    elif mode in ('event-time', 'assume-event-time'):
+        available = event; source = 'event_time_assumption'
+    elif mode == 'ingested-at' and ingested is not None:
+        available = ingested; source = 'ingested_at'
+    elif mode == 'reject-missing':
+        raise ValueError('availability evidence missing / availability proof missing: provide available_at per value or choose an explicit --availability-mode')
+    elif mode == 'ingested-at':
+        raise ValueError('availability evidence missing / availability proof missing: --availability-mode ingested-at requires ingested_at per value')
+    else:
+        raise ValueError('Unsupported availability mode: ' + str(mode))
+    return {'event_time': event, 'available_at': available, 'ingested_at': ingested, 'availability_source': source}
+
+
+
+def select_versions_available_as_of(dataset, *, as_of: dt.datetime, mode: str = 'reject-missing'):
+    grouped = {}
+    rejected_after_as_of = 0
+    source_counts = {}
+    for row in dataset.get('values') or []:
+        resolved = resolve_available_at(row, mode=mode)
+        source_counts[resolved['availability_source']] = source_counts.get(resolved['availability_source'], 0) + 1
+        event = resolved['event_time']
+        available = resolved['available_at']
+        if available > as_of:
+            rejected_after_as_of += 1
+            continue
+        current = grouped.get(event)
+        if current is None or available > current[0]:
+            new_row = dict(row)
+            new_row['timestamp'] = event.isoformat()
+            new_row.setdefault('event_time', event.isoformat())
+            new_row.setdefault('available_at', available.isoformat())
+            if resolved['ingested_at'] is not None:
+                new_row.setdefault('ingested_at', resolved['ingested_at'].isoformat())
+            grouped[event] = (available, new_row)
+    selected = [row for _, row in sorted(grouped.values(), key=lambda item: parse_stamp(item[1]['timestamp']))]
+    out = dict(dataset)
+    out['values'] = selected
+    return out, {'selected_corrections': max(0, len(dataset.get('values') or []) - rejected_after_as_of - len(selected)), 'rejected_after_as_of': rejected_after_as_of, 'availability_source_counts': source_counts}
+
+def information_availability_check(dataset, *, as_of: dt.datetime, mode: str = 'reject-missing', information_cutoff_value: dt.datetime | None = None):
+    selected_dataset, versioning = select_versions_available_as_of(dataset, as_of=as_of, mode=mode)
+    values = dataset.get('values') or []
+    failures = []
+    source_counts = dict(versioning.get('availability_source_counts') or {})
+    latest_event = latest_available = latest_ingested = None
+    for row in values:
+        resolved = resolve_available_at(row, mode=mode)
+        event = resolved['event_time']; available = resolved['available_at']; ingested = resolved['ingested_at']
+        latest_event = event if latest_event is None or event > latest_event else latest_event
+        latest_available = available if latest_available is None or available > latest_available else latest_available
+        if ingested is not None:
+            latest_ingested = ingested if latest_ingested is None or ingested > latest_ingested else latest_ingested
+        if information_cutoff_value is not None and event >= information_cutoff_value:
+            failures.append({'timestamp': event.isoformat(), 'code': 'event_time_after_information_cutoff', 'message': 'event_time/timestamp is not before information_cutoff'})
+        if available > as_of:
+            failures.append({'timestamp': event.isoformat(), 'available_at': available.isoformat(), 'code': 'available_after_as_of', 'message': 'value was available after as_of'})
+    return {
+        'status': 'ok' if not failures else 'fail',
+        'mode': mode,
+        'as_of': as_of.isoformat(),
+        'information_cutoff': information_cutoff_value.isoformat() if information_cutoff_value else None,
+        'records': len(values),
+        'selected_corrections': versioning.get('selected_corrections', 0),
+        'rejected_after_as_of': versioning.get('rejected_after_as_of', 0),
+        'availability_source_counts': source_counts,
+        'latest_event_time': latest_event.isoformat() if latest_event else None,
+        'latest_available_at': latest_available.isoformat() if latest_available else None,
+        'latest_ingested_at': latest_ingested.isoformat() if latest_ingested else None,
+        'failures': failures[:50],
+        'failure_count': len(failures),
+    }
+
+
+def materialize_dataset_as_of(dataset, *, as_of: dt.datetime, mode: str, information_cutoff_value: dt.datetime | None = None):
+    selected = {}
+    late_rows = []
+    source_counts = {}
+    duplicate_events = set()
+    selected_corrections = 0
+    for row in dataset.get('values') or []:
+        resolved = resolve_available_at(row, mode=mode)
+        source_counts[resolved['availability_source']] = source_counts.get(resolved['availability_source'], 0) + 1
+        event = resolved['event_time']; available = resolved['available_at']
+        if information_cutoff_value is not None and event >= information_cutoff_value:
+            late_rows.append({'timestamp': event.isoformat(), 'available_at': available.isoformat(), 'code': 'event_time_after_information_cutoff', 'message': 'event_time/timestamp is not before information_cutoff'})
+            continue
+        if available > as_of:
+            late_rows.append({'timestamp': event.isoformat(), 'available_at': available.isoformat(), 'code': 'available_after_as_of', 'message': 'value was available after as_of'})
+            continue
+        if event in selected:
+            duplicate_events.add(event)
+            if available >= selected[event][0]:
+                selected_corrections += 1
+                selected[event] = (available, resolved, row)
+        else:
+            selected[event] = (available, resolved, row)
+    missing_versions = [item for item in late_rows if parse_stamp(item['timestamp']) not in selected]
+    if missing_versions:
+        raise ValueError('value available after as_of or after information cutoff: ' + str(missing_versions[:3]))
+    values = []
+    for event, (available, resolved, row) in sorted(selected.items(), key=lambda item: item[0]):
+        item = dict(row)
+        item['timestamp'] = event.isoformat()
+        item['event_time'] = event.isoformat()
+        item['available_at'] = available.isoformat()
+        if resolved.get('ingested_at') is not None:
+            item['ingested_at'] = resolved['ingested_at'].isoformat()
+        item['availability_source'] = resolved['availability_source']
+        values.append(item)
+    materialized = dict(dataset)
+    materialized['values'] = values
+    check = {
+        'status': 'ok',
+        'mode': mode,
+        'as_of': as_of.isoformat(),
+        'information_cutoff': information_cutoff_value.isoformat() if information_cutoff_value else None,
+        'records': len(dataset.get('values') or []),
+        'selected_records': len(values),
+        'availability_source_counts': source_counts,
+        'versioned_event_times': len(duplicate_events),
+        'selected_corrections': selected_corrections,
+        'rejected_after_as_of': len(late_rows),
+        'rejected_examples': late_rows[:20],
+    }
+    return materialized, check
+
+
+def artifact_ref(path: Path, value=None):
+    ref = {'path': str(path.name)}
+    if path.exists():
+        ref['sha256'] = sha256_bytes(path.read_bytes())
+    elif value is not None:
+        ref['sha256'] = sha256_json(value)
+    return ref
+
+
+def integrity_gate(name: str, result: dict, *, required=True):
+    raw = result.get('status') or result.get('decision') or result.get('ok')
+    passed = raw in ('ok', 'pass', True)
+    if raw == 'warning' and not required:
+        passed = True
+    payload = {'name': name, 'required': required, 'status': 'pass' if passed else 'fail'}
+    if isinstance(result, dict):
+        payload.update(result)
+    else:
+        payload['result'] = result
+    return payload
+
+
+def build_integrity_receipt(*, operation: str, tenant_id=None, series_id=None, as_of=None, information_cutoff_value=None, artifacts=None, gates=None, links=None):
+    gate_items = gates or []
+    gate_map = {}
+    for gate in gate_items:
+        key = gate.get('name', 'gate')
+        if key.startswith('information_availability'):
+            key = 'availability'
+        elif key.endswith('_quality') or key == 'quality_report':
+            key = key.replace('_quality', '_quality_report') if key.endswith('_quality') else 'quality_report'
+        gate_map[key] = {k: v for k, v in gate.items() if k != 'name'}
+    status = 'pass' if all(g.get('status') in ('pass', 'ok') for g in gate_map.values() if g.get('required', True)) else 'fail'
+    receipt = {
+        'contract_id': 'CET-FC-DIC-001',
+        'receipt_schema_version': 'cernion.forecast.integrity-receipt.v1',
+        'status': status,
+        'operation': operation,
+        'created_at': dt.datetime.now(UTC).isoformat(),
+        'created_by': f'cernion-forecast-cli/{CLI_VERSION}',
+        'tenant_id': tenant_id,
+        'series_id': series_id,
+        'as_of': as_of.isoformat() if isinstance(as_of, dt.datetime) else as_of,
+        'information_cutoff': information_cutoff_value.isoformat() if isinstance(information_cutoff_value, dt.datetime) else information_cutoff_value,
+        'gates': gate_map,
+        'artifacts': artifacts or {},
+        'links': links or {},
+    }
+    receipt['receipt_hash'] = sha256_json({k: v for k, v in receipt.items() if k != 'receipt_hash'})
+    return receipt
+
+
+def save_integrity_receipt(out: Path, receipt: dict):
+    save_json(out / 'integrity_receipt.json', receipt)
+    return receipt
+
 def history_days_before_d2(history_by_ts, forecast_for: dt.date, timezone: str, min_days: int):
     return training_window_check(history_by_ts, forecast_for, timezone, min_days)
 
@@ -1339,7 +1580,15 @@ def quality_gate(profile, forecast_metrics, baseline_metrics, *, max_wape=None, 
 def cmd_e2e(args):
     fresh_out(args.out, getattr(args, 'resume_out', False))
     history, history_audit = load_dataset(args.history, args.series_id, args.unit, args.timezone, args=args)
-    actual, actual_audit = load_dataset(args.actuals, args.series_id, args.unit, args.timezone, args=args)
+    actual_args = argparse.Namespace(**vars(args)); actual_args.allow_versioned_values = False
+    actual, actual_audit = load_dataset(args.actuals, args.series_id, args.unit, args.timezone, args=actual_args)
+    as_of = getattr(args, 'as_of', None) or information_cutoff(args.forecast_for, history['timezone'])
+    cutoff = information_cutoff(args.forecast_for, history['timezone'])
+    raw_history_by_ts = {parse_stamp(r['timestamp']): finite_number(r['value']) for r in history['values']}
+    raw_window = history_days_before_d2(raw_history_by_ts, args.forecast_for, history['timezone'], args.min_history_days_before_d2)
+    if raw_window['status'] != 'ok':
+        raise ValueError('E2E history window failed: ' + str(raw_window.get('reason')))
+    history, availability = materialize_dataset_as_of(history, as_of=as_of, mode=getattr(args, 'availability_mode', 'reject-missing'), information_cutoff_value=cutoff)
     history_quality = quality_report(history, min_coverage=args.min_coverage, expected_intervals=args.expected_intervals, allow_gaps=args.allow_gaps, allow_negative=args.allow_negative, policy=args.quality_policy)
     actual_quality = quality_report(actual, min_coverage=args.min_coverage, expected_intervals=args.expected_intervals, allow_gaps=args.allow_gaps, allow_negative=args.allow_negative, policy=args.quality_policy)
     if history_quality['status'] == 'failed' or actual_quality['status'] == 'failed':
@@ -1387,7 +1636,7 @@ def cmd_e2e(args):
     if not matching or len(matching) != len(predictions):
         raise ValueError('E2E requires complete actuals for every prediction timestamp')
     forecast_metrics, residuals = metric_summary([(t, truth[t], predictions[t]) for t in matching], expected_intervals=horizon['expected_intervals'])
-    baseline_metrics = e2e_baseline_metrics(history_by_ts, truth, matching, args.baselines.split(','), as_of=information_cutoff(args.forecast_for, history['timezone']), timezone=history['timezone'])
+    baseline_metrics = e2e_baseline_metrics(history_by_ts, truth, matching, args.baselines.split(','), as_of=as_of, timezone=history['timezone'])
     gate = quality_gate(args.quality_profile, forecast_metrics, baseline_metrics, max_wape=args.max_wape, min_coverage=args.min_score_coverage, baseline_tolerance=args.baseline_tolerance, require_baseline_delta=not args.no_baseline_gate)
     manifest = {
         'tenant_id': tenant,
@@ -1400,6 +1649,7 @@ def cmd_e2e(args):
         'actual_quality': actual_quality,
         'leakage_check': leak,
         'history_window_check': history_window,
+        'information_availability_check': availability,
         'forecast_horizon_check': horizon,
         'forecast_context': context,
         'history_result': uploaded,
@@ -1416,13 +1666,27 @@ def cmd_e2e(args):
         'forecast_context': context,
         'leakage_check': leak,
         'history_window_check': history_window,
+        'information_availability_check': availability,
         'forecast_horizon_check': horizon,
         'forecast_metrics': forecast_metrics,
         'baseline_metrics': baseline_metrics,
         'quality_gate': gate,
     }
+    receipt_gates = [
+        integrity_gate('history_quality', history_quality),
+        integrity_gate('actual_quality', actual_quality),
+        integrity_gate('leakage_check', leak),
+        integrity_gate('history_window_check', history_window),
+        integrity_gate('information_availability_check', availability),
+        integrity_gate('forecast_horizon_check', horizon),
+        integrity_gate('quality_gate', gate),
+    ]
+    receipt = build_integrity_receipt(operation='e2e', tenant_id=tenant, series_id=history['series_id'], as_of=as_of, information_cutoff_value=cutoff, artifacts={'run_manifest': {'path': 'run_manifest.json'}, 'prediction_result': {'path': 'prediction_result.json'}, 'quality_gate': {'path': 'quality_gate.json'}, 'e2e_summary': {'path': 'e2e-summary.json'}}, gates=receipt_gates, links={'run_manifest': 'run_manifest.json', 'data_import': 'run_manifest.json#history_result', 'training': 'run_manifest.json#train_result', 'prediction': 'prediction_result.json', 'quality_report': 'quality_gate.json'})
+    manifest['integrity_receipt'] = {'path': 'integrity_receipt.json', 'sha256': receipt['receipt_hash']}
+    summary['integrity_receipt'] = manifest['integrity_receipt']
+    save_integrity_receipt(args.out, receipt)
     save_json(args.out / 'run_manifest.json', manifest)
-    save_json(args.out / 'prediction_result.json', {'tenant_id': tenant, 'base_url': client.base, 'result': forecast_result, 'client_run_id': predict_idem})
+    save_json(args.out / 'prediction_result.json', {'tenant_id': tenant, 'base_url': client.base, 'result': forecast_result, 'client_run_id': predict_idem, 'integrity_receipt': manifest['integrity_receipt']})
     save_json(args.out / 'baseline_metrics.json', baseline_metrics)
     save_json(args.out / 'quality_gate.json', gate)
     save_json(args.out / 'e2e-summary.json', summary)
@@ -1584,7 +1848,7 @@ def cmd_describe(args):
     payload = {'name': 'cernion-forecast-cli', 'version': CLI_VERSION, 'schema_version': ARTIFACT_SCHEMA,
                'commands': ['day-ahead', 'history', 'enroll', 'train', 'predict', 'resume', 'score', 'acceptance-test', 'e2e', 'doctor', 'batch', 'describe'],
                'exit_codes': {'0': 'success', '1': 'validation/runtime error', '2': 'command line usage error', '10': 'idempotent skip', '50': 'quality/acceptance threshold failed'},
-               'input_formats': ['json', 'csv', 'mscons', 'edi', 'edifact'], 'output_artifacts': ['run.json', 'result.json', 'quality_report.json', 'metrics.json', 'residuals.csv', 'acceptance_report.json', 'e2e-summary.json', 'quality_gate.json']}
+               'input_formats': ['json', 'csv', 'mscons', 'edi', 'edifact'], 'output_artifacts': ['run.json', 'result.json', 'quality_report.json', 'metrics.json', 'residuals.csv', 'acceptance_report.json', 'e2e-summary.json', 'quality_gate.json', 'integrity_receipt.json']}
     print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
@@ -1622,6 +1886,11 @@ def add_quality_args(sub):
     sub.add_argument('--allow-negative', action='store_true')
 
 
+
+def add_availability_args(sub):
+    sub.add_argument('--availability-mode', choices=['reject-missing', 'verified', 'event-time', 'assume-event-time', 'ingested-at', 'assume-ingested'], default='reject-missing', help='How to handle historical values without explicit available_at proof')
+    sub.add_argument('--as-of', type=parse_stamp, help='Information availability cutoff; defaults to D-2 information cutoff where forecast_for is known')
+
 def add_mscons_select_args(sub):
     sub.add_argument('--melo-id')
     sub.add_argument('--obis')
@@ -1655,7 +1924,7 @@ def build_parser():
     add_context_args(day); day.set_defaults(func=cmd_day_ahead)
 
     for name in ('history', 'enroll'):
-        sp = sub.add_parser(name); add_common(sp); add_output_args(sp); add_quality_args(sp); add_mscons_select_args(sp); add_context_args(sp)
+        sp = sub.add_parser(name); add_common(sp); add_output_args(sp); add_quality_args(sp); add_availability_args(sp); add_mscons_select_args(sp); add_context_args(sp)
         sp.add_argument('--input', type=Path, required=True); sp.add_argument('--series-id'); sp.add_argument('--unit', choices=['kWh', 'kW']); sp.add_argument('--timezone')
         sp.add_argument('--allow-corrections', action='store_true'); sp.add_argument('--historical-import', action='store_true'); sp.add_argument('--import-mode', choices=['append-only', 'correction', 'replace-period'], default='append-only')
         sp.add_argument('--processed-ledger', type=Path); sp.add_argument('--idempotency-key'); sp.add_argument('--skip-if-processed', action='store_true')
@@ -1687,7 +1956,7 @@ def build_parser():
     accept.add_argument('--require-better-than', nargs='+', choices=['persistence', 'weekly_naive', 'previous-day', 'previous-week', 'rolling-mean']); accept.add_argument('--min-relative-improvement', type=float, default=0.0)
     accept.add_argument('--max-wape', type=float); accept.add_argument('--max-bias', type=float); accept.add_argument('--min-score-coverage', type=float); accept.set_defaults(func=cmd_acceptance_test)
 
-    e2e = sub.add_parser('e2e'); add_common(e2e); add_quality_args(e2e); add_mscons_select_args(e2e); add_context_args(e2e)
+    e2e = sub.add_parser('e2e'); add_common(e2e); add_quality_args(e2e); add_availability_args(e2e); add_mscons_select_args(e2e); add_context_args(e2e)
     e2e.add_argument('--series-id', required=True); e2e.add_argument('--history', type=Path, required=True); e2e.add_argument('--actuals', type=Path, required=True)
     e2e.add_argument('--forecast-for', type=dt.date.fromisoformat, required=True); e2e.add_argument('--unit', choices=['kWh', 'kW']); e2e.add_argument('--timezone')
     e2e.add_argument('--min-observed-history-days', '--min-history-days-before-d2', dest='min_history_days_before_d2', type=int, default=28)
@@ -1695,14 +1964,14 @@ def build_parser():
     e2e.add_argument('--quality-profile', choices=['monitoring', 'portfolio', 'system-load', 'household', 'industrial', 'volatile', 'strict'], default='portfolio')
     e2e.add_argument('--baselines', default='previous-day,previous-week,rolling-mean')
     e2e.add_argument('--max-wape', type=float); e2e.add_argument('--min-score-coverage', type=float); e2e.add_argument('--baseline-tolerance', type=float, default=0.0); e2e.add_argument('--no-baseline-gate', action='store_true')
-    e2e.set_defaults(func=cmd_e2e)
+    e2e.set_defaults(func=cmd_e2e, allow_versioned_values=True)
 
-    bh = sub.add_parser('batch-history'); add_common(bh); add_quality_args(bh); add_context_args(bh); add_mscons_select_args(bh)
+    bh = sub.add_parser('batch-history'); add_common(bh); add_quality_args(bh); add_availability_args(bh); add_context_args(bh); add_mscons_select_args(bh)
     bh.add_argument('--input-dir', type=Path, required=True); bh.add_argument('--glob', default='*'); bh.add_argument('--series-id-field', default='series_id')
     bh.add_argument('--allow-corrections', action='store_true'); bh.add_argument('--historical-import', action='store_true'); bh.add_argument('--import-mode', choices=['append-only', 'correction', 'replace-period'], default='append-only')
     bh.add_argument('--processed-ledger', type=Path); bh.add_argument('--idempotency-key'); bh.add_argument('--skip-if-processed', action='store_true'); bh.set_defaults(func=cmd_batch_history)
     doctor = sub.add_parser('doctor'); add_common(doctor); doctor.set_defaults(func=cmd_doctor)
-    batch = sub.add_parser('batch'); add_common(batch); add_quality_args(batch); add_context_args(batch); add_mscons_select_args(batch)
+    batch = sub.add_parser('batch'); add_common(batch); add_quality_args(batch); add_availability_args(batch); add_context_args(batch); add_mscons_select_args(batch)
     batch.add_argument('--manifest', type=Path, required=True); batch.add_argument('--continue-on-error', action='store_true')
     batch.add_argument('--allow-corrections', action='store_true'); batch.add_argument('--historical-import', action='store_true'); batch.add_argument('--import-mode', choices=['append-only', 'correction', 'replace-period'], default='append-only'); batch.set_defaults(func=cmd_batch)
     describe = sub.add_parser('describe'); describe.set_defaults(func=cmd_describe)
