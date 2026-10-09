@@ -16,6 +16,10 @@ The project follows semantic-versioning intent. Before `1.0.0`, command names an
 - Added strict productive conformance schemas for canonical time series, information cutoff, integrity receipts and validation errors, separating permissive exchange objects from contract-bound production evidence.
 - Added `verify-receipt` to verify artifact-manifest hashes bound by `integrity_receipt.json`.
 
+### Changed
+
+- Refactored integrity-related responsibilities out of `cli.py` into `availability.py`, `versioning.py`, `integrity.py` and `evidence.py`, with executable conformance tests under `tests/conformance/`.
+
 ### Fixed
 
 - `--allow-partial` no longer accepts forecasts with duplicate timestamps or predictions outside the expected horizon; it only tolerates missing values.

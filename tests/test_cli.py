@@ -686,7 +686,7 @@ class CLITests(unittest.TestCase):
                 p = run_cli('e2e', '--base-url', api.url, '--series-id', 'meter-a', '--history', str(history), '--actuals', str(actuals), '--forecast-for', '2026-09-28', '--quality-policy', 'lenient', '--quality-profile', 'system-load', '--baselines', 'previous-week', '--no-baseline-gate', '--min-observed-history-days', '0', '--availability-mode', 'assume-event-time', '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
                 self.assertEqual(p.returncode, 0, p.stderr)
                 receipt = json.loads((out / 'integrity_receipt.json').read_text())
-                self.assertEqual(receipt['integrity_decision']['status'], 'ACCEPTED_WITH_ASSUMPTIONS')
+                self.assertEqual(receipt['integrity_decision']['status'], 'PROVISIONAL')
                 self.assertEqual(receipt['gates']['availability']['evidence_level'], 'ASSUMED')
                 self.assertNotEqual(receipt['integrity_decision']['status'], 'ACCEPTED')
         finally:
@@ -1002,7 +1002,7 @@ class CLITests(unittest.TestCase):
                 p = run_cli('e2e', '--base-url', api.url, '--series-id', 'meter-a', '--history', str(history), '--actuals', str(actuals), '--forecast-for', '2026-09-28', '--quality-policy', 'lenient', '--quality-profile', 'system-load', '--baselines', 'previous-week', '--max-wape', '10', '--no-baseline-gate', '--min-observed-history-days', '0', '--availability-mode', 'assume-event-time', '--out', str(out), env={'CET_API_TOKEN': 'ck_12345678901234567890'})
                 self.assertEqual(p.returncode, 0, p.stderr)
                 receipt = json.loads((out / 'integrity_receipt.json').read_text())
-                self.assertEqual(receipt['integrity_decision']['status'], 'ACCEPTED_WITH_ASSUMPTIONS')
+                self.assertEqual(receipt['integrity_decision']['status'], 'PROVISIONAL')
                 self.assertEqual(receipt['integrity_decision']['availability_evidence'], 'ASSUMED')
                 self.assertNotEqual(receipt['integrity_decision']['status'], 'ACCEPTED')
         finally:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
-import hashlib
 import json
 import logging
 import math
@@ -18,6 +17,23 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from .availability import (
+    information_availability_check,
+    parse_stamp,
+    resolve_available_at,
+    select_versions_available_as_of,
+)
+from .evidence import (
+    artifact_manifest,
+    build_integrity_receipt,
+    save_integrity_receipt,
+    sha256_bytes,
+    sha256_json,
+    verify_receipt,
+)
+from .integrity import compute_forecast_acceptance_decision, integrity_gate
+from .versioning import materialize_dataset_as_of
 
 ROOT = '/api/forecast-sandbox/consumption/portfolio'
 SANDBOX = '/api/forecast-sandbox/consumption'
@@ -62,22 +78,6 @@ def add_artifact_meta(value: dict, artifact_type: str) -> dict:
     return value
 
 
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def sha256_json(value) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
-
-
-def parse_stamp(value: str) -> dt.datetime:
-    if not isinstance(value, str) or not value:
-        raise ValueError('Timestamps require an offset and a PT15M grid')
-    text = value.replace('Z', '+00:00')
-    parsed = dt.datetime.fromisoformat(text)
-    if parsed.tzinfo is None or parsed.second or parsed.microsecond or parsed.minute % 15:
-        raise ValueError('Timestamps require an offset and a PT15M grid')
-    return parsed.astimezone(UTC)
 
 
 def finite_nonnegative(value) -> float:
@@ -920,7 +920,7 @@ def cmd_history_like(args, train_after=False):
         receipt_gates = [integrity_gate('quality_report', quality)]
         if availability:
             receipt_gates.append(integrity_gate('information_availability', availability))
-        receipt = build_integrity_receipt(operation=state['operation'], tenant_id=state.get('tenant_id'), series_id=dataset['series_id'], as_of=as_of, information_cutoff_value=as_of, artifacts={'run': {'path': 'run.json'}, 'quality_report': {'path': 'quality_report.json'}}, gates=receipt_gates, links={'run': 'run.json', 'quality_report': 'quality_report.json'})
+        receipt = build_integrity_receipt(cli_version=CLI_VERSION, operation=state['operation'], tenant_id=state.get('tenant_id'), series_id=dataset['series_id'], as_of=as_of, information_cutoff_value=as_of, artifacts={'run': {'path': 'run.json'}, 'quality_report': {'path': 'quality_report.json'}}, gates=receipt_gates, links={'run': 'run.json', 'quality_report': 'quality_report.json'})
         save_integrity_receipt(args.out, receipt)
         state['integrity_receipt'] = {'path': 'integrity_receipt.json', 'sha256': receipt['receipt_hash']}
         save_json(args.out / 'run.json', state)
@@ -936,7 +936,7 @@ def cmd_history_like(args, train_after=False):
         receipt_gates = [integrity_gate('quality_report', quality)]
         if availability:
             receipt_gates.append(integrity_gate('information_availability', availability))
-        receipt = build_integrity_receipt(operation=state['operation'], tenant_id=tenant, series_id=dataset['series_id'], as_of=as_of, information_cutoff_value=as_of, artifacts={'run': {'path': 'run.json'}, 'result': {'path': 'result.json'}, 'quality_report': {'path': 'quality_report.json'}}, gates=receipt_gates, links={'data_import': 'result.json', 'quality_report': 'quality_report.json'})
+        receipt = build_integrity_receipt(cli_version=CLI_VERSION, operation=state['operation'], tenant_id=tenant, series_id=dataset['series_id'], as_of=as_of, information_cutoff_value=as_of, artifacts={'run': {'path': 'run.json'}, 'result': {'path': 'result.json'}, 'quality_report': {'path': 'quality_report.json'}}, gates=receipt_gates, links={'data_import': 'result.json', 'quality_report': 'quality_report.json'})
         save_integrity_receipt(args.out, receipt)
         state['integrity_receipt'] = {'path': 'integrity_receipt.json', 'sha256': receipt['receipt_hash']}
         save_json(args.out / 'run.json', state)
@@ -967,7 +967,7 @@ def cmd_history_like(args, train_after=False):
     receipt_gates = [integrity_gate('quality_report', quality)]
     if availability:
         receipt_gates.append(integrity_gate('information_availability', availability))
-    receipt = build_integrity_receipt(operation=state['operation'], tenant_id=tenant, series_id=dataset['series_id'], as_of=as_of, information_cutoff_value=as_of, artifacts={'run': {'path': 'run.json'}, 'result': {'path': 'result.json'}, 'quality_report': {'path': 'quality_report.json'}}, gates=receipt_gates, links={'data_import': 'run.json', 'training': 'result.json', 'quality_report': 'quality_report.json'})
+    receipt = build_integrity_receipt(cli_version=CLI_VERSION, operation=state['operation'], tenant_id=tenant, series_id=dataset['series_id'], as_of=as_of, information_cutoff_value=as_of, artifacts={'run': {'path': 'run.json'}, 'result': {'path': 'result.json'}, 'quality_report': {'path': 'quality_report.json'}}, gates=receipt_gates, links={'data_import': 'run.json', 'training': 'result.json', 'quality_report': 'quality_report.json'})
     save_integrity_receipt(args.out, receipt)
     state['integrity_receipt'] = {'path': 'integrity_receipt.json', 'sha256': receipt['receipt_hash']}
     save_json(args.out / 'run.json', state)
@@ -1354,281 +1354,6 @@ def training_window_check(history_by_ts, forecast_for: dt.date, timezone: str, m
 
 
 
-def parse_optional_stamp(value, field: str, row_ts: str | None = None):
-    if value in (None, ''):
-        return None
-    try:
-        return parse_stamp(value)
-    except Exception as error:
-        where = f' for row {row_ts}' if row_ts else ''
-        raise ValueError(f'{field}{where} must be an ISO timestamp with offset on a PT15M grid') from error
-
-
-def row_event_time(row):
-    return parse_stamp(row.get('event_time') or row.get('timestamp') or row.get('ts'))
-
-
-def resolve_available_at(row, *, mode: str):
-    aliases = {'assume-event-time': 'event-time', 'assume-ingested': 'ingested-at', 'verified': 'reject-missing'}
-    mode = aliases.get(mode, mode)
-    event = row_event_time(row)
-    available = parse_optional_stamp(row.get('available_at'), 'available_at', row.get('timestamp') or row.get('ts'))
-    ingested = parse_optional_stamp(row.get('ingested_at'), 'ingested_at', row.get('timestamp') or row.get('ts'))
-    if available is not None:
-        source = 'available_at'; evidence_level = 'VERIFIED'
-    elif mode in ('event-time', 'assume-event-time'):
-        available = event; source = 'event_time_assumption'; evidence_level = 'ASSUMED'
-    elif mode == 'ingested-at' and ingested is not None:
-        available = ingested; source = 'ingested_at'; evidence_level = 'ASSUMED'
-    elif mode == 'reject-missing':
-        raise ValueError('availability evidence missing / availability proof missing: provide available_at per value or choose an explicit --availability-mode')
-    elif mode == 'ingested-at':
-        raise ValueError('availability evidence missing / availability proof missing: --availability-mode ingested-at requires ingested_at per value')
-    else:
-        raise ValueError('Unsupported availability mode: ' + str(mode))
-    return {'event_time': event, 'available_at': available, 'ingested_at': ingested, 'availability_source': source, 'evidence_level': evidence_level}
-
-
-
-def select_versions_available_as_of(dataset, *, as_of: dt.datetime, mode: str = 'reject-missing'):
-    grouped = {}
-    rejected_after_as_of = 0
-    source_counts = {}
-    for row in dataset.get('values') or []:
-        resolved = resolve_available_at(row, mode=mode)
-        source_counts[resolved['availability_source']] = source_counts.get(resolved['availability_source'], 0) + 1
-        event = resolved['event_time']
-        available = resolved['available_at']
-        if available > as_of:
-            rejected_after_as_of += 1
-            continue
-        current = grouped.get(event)
-        if current is None or available > current[0]:
-            new_row = dict(row)
-            new_row['timestamp'] = event.isoformat()
-            new_row.setdefault('event_time', event.isoformat())
-            new_row.setdefault('available_at', available.isoformat())
-            if resolved['ingested_at'] is not None:
-                new_row.setdefault('ingested_at', resolved['ingested_at'].isoformat())
-            grouped[event] = (available, new_row)
-    selected = [row for _, row in sorted(grouped.values(), key=lambda item: parse_stamp(item[1]['timestamp']))]
-    out = dict(dataset)
-    out['values'] = selected
-    return out, {'selected_corrections': max(0, len(dataset.get('values') or []) - rejected_after_as_of - len(selected)), 'rejected_after_as_of': rejected_after_as_of, 'availability_source_counts': source_counts}
-
-def information_availability_check(dataset, *, as_of: dt.datetime, mode: str = 'reject-missing', information_cutoff_value: dt.datetime | None = None):
-    selected_dataset, versioning = select_versions_available_as_of(dataset, as_of=as_of, mode=mode)
-    values = dataset.get('values') or []
-    failures = []
-    source_counts = dict(versioning.get('availability_source_counts') or {})
-    latest_event = latest_available = latest_ingested = None
-    for row in values:
-        resolved = resolve_available_at(row, mode=mode)
-        event = resolved['event_time']; available = resolved['available_at']; ingested = resolved['ingested_at']
-        latest_event = event if latest_event is None or event > latest_event else latest_event
-        latest_available = available if latest_available is None or available > latest_available else latest_available
-        if ingested is not None:
-            latest_ingested = ingested if latest_ingested is None or ingested > latest_ingested else latest_ingested
-        if information_cutoff_value is not None and event >= information_cutoff_value:
-            failures.append({'timestamp': event.isoformat(), 'code': 'event_time_after_information_cutoff', 'message': 'event_time/timestamp is not before information_cutoff'})
-        if available > as_of:
-            failures.append({'timestamp': event.isoformat(), 'available_at': available.isoformat(), 'code': 'available_after_as_of', 'message': 'value was available after as_of'})
-    return {
-        'status': 'ok' if not failures else 'fail',
-        'mode': mode,
-        'as_of': as_of.isoformat(),
-        'information_cutoff': information_cutoff_value.isoformat() if information_cutoff_value else None,
-        'records': len(values),
-        'selected_corrections': versioning.get('selected_corrections', 0),
-        'rejected_after_as_of': versioning.get('rejected_after_as_of', 0),
-        'availability_source_counts': source_counts,
-        'latest_event_time': latest_event.isoformat() if latest_event else None,
-        'latest_available_at': latest_available.isoformat() if latest_available else None,
-        'latest_ingested_at': latest_ingested.isoformat() if latest_ingested else None,
-        'failures': failures[:50],
-        'failure_count': len(failures),
-    }
-
-
-
-def value_version_id(row):
-    for field in ('value_version', 'version_id', 'revision'):
-        if row.get(field) not in (None, ''):
-            return str(row.get(field))
-    return None
-
-
-def version_sort_key(row):
-    if row.get('revision') not in (None, ''):
-        text = str(row.get('revision'))
-        return (1, int(text)) if text.isdigit() else (1, text)
-    if row.get('value_version') not in (None, ''):
-        return (1, str(row.get('value_version')))
-    if row.get('version_id') not in (None, ''):
-        return (1, str(row.get('version_id')))
-    return (0, '')
-
-def materialize_dataset_as_of(dataset, *, as_of: dt.datetime, mode: str, information_cutoff_value: dt.datetime | None = None):
-    selected = {}
-    late_rows = []
-    source_counts = {}
-    evidence_levels = set()
-    duplicate_events = set()
-    selected_corrections = 0
-    selection_decisions = []
-    for row in dataset.get('values') or []:
-        resolved = resolve_available_at(row, mode=mode)
-        source_counts[resolved['availability_source']] = source_counts.get(resolved['availability_source'], 0) + 1
-        evidence_levels.add(resolved['evidence_level'])
-        event = resolved['event_time']; available = resolved['available_at']
-        version_id = value_version_id(row)
-        candidate = {'event_time': event.isoformat(), 'available_at': available.isoformat(), 'value_version': version_id, 'value': row.get('value')}
-        if information_cutoff_value is not None and event >= information_cutoff_value:
-            late_rows.append({**candidate, 'code': 'event_time_after_information_cutoff', 'message': 'event_time/timestamp is not before information_cutoff'})
-            continue
-        if available > as_of:
-            late_rows.append({**candidate, 'code': 'available_after_as_of', 'message': 'value was available after as_of'})
-            continue
-        if event in selected:
-            duplicate_events.add(event)
-            current_available, current_resolved, current_row = selected[event]
-            if available == current_available:
-                current_version = value_version_id(current_row)
-                if version_id is None or current_version is None or version_sort_key(row) == version_sort_key(current_row):
-                    if finite_number(row.get('value')) != finite_number(current_row.get('value')):
-                        raise ValueError('ambiguous correction versions / ambiguous data versions for ' + event.isoformat() + ': equal available_at requires a stable value_version/revision ordering')
-                if version_sort_key(row) > version_sort_key(current_row):
-                    selected_corrections += 1
-                    selection_decisions.append({'event_time': event.isoformat(), 'selected_version': version_id, 'previous_version': current_version, 'reason': 'higher_revision_same_available_at'})
-                    selected[event] = (available, resolved, row)
-                else:
-                    selection_decisions.append({'event_time': event.isoformat(), 'selected_version': current_version, 'rejected_version': version_id, 'reason': 'lower_or_equal_revision_same_available_at'})
-            elif available > current_available:
-                selected_corrections += 1
-                selection_decisions.append({'event_time': event.isoformat(), 'selected_version': version_id, 'previous_version': value_version_id(current_row), 'reason': 'latest_available_before_as_of'})
-                selected[event] = (available, resolved, row)
-            else:
-                selection_decisions.append({'event_time': event.isoformat(), 'selected_version': value_version_id(current_row), 'rejected_version': version_id, 'reason': 'older_available_at'})
-        else:
-            selected[event] = (available, resolved, row)
-    missing_versions = [item for item in late_rows if parse_stamp(item['event_time']) not in selected]
-    if missing_versions:
-        raise ValueError('value available after as_of or after information cutoff: ' + str(missing_versions[:3]))
-    values = []
-    for event, (available, resolved, row) in sorted(selected.items(), key=lambda item: item[0]):
-        item = dict(row)
-        item['timestamp'] = event.isoformat()
-        item['event_time'] = event.isoformat()
-        item['available_at'] = available.isoformat()
-        if resolved.get('ingested_at') is not None:
-            item['ingested_at'] = resolved['ingested_at'].isoformat()
-        item['availability_source'] = resolved['availability_source']
-        item['availability_evidence'] = resolved['evidence_level']
-        values.append(item)
-    materialized = dict(dataset)
-    materialized['values'] = values
-    evidence_level = 'ASSUMED' if 'ASSUMED' in evidence_levels else 'VERIFIED' if evidence_levels else 'UNVERIFIABLE'
-    check = {
-        'status': 'ok',
-        'mode': mode,
-        'evidence_level': evidence_level,
-        'as_of': as_of.isoformat(),
-        'information_cutoff': information_cutoff_value.isoformat() if information_cutoff_value else None,
-        'records': len(dataset.get('values') or []),
-        'selected_records': len(values),
-        'availability_source_counts': source_counts,
-        'versioned_event_times': len(duplicate_events),
-        'selected_corrections': selected_corrections,
-        'rejected_after_as_of': len(late_rows),
-        'rejected_examples': late_rows[:20],
-        'selection_decisions': selection_decisions[:100],
-    }
-    return materialized, check
-
-def artifact_ref(path: Path, value=None):
-    ref = {'path': str(path.name)}
-    if path.exists():
-        ref['sha256'] = sha256_bytes(path.read_bytes())
-    elif value is not None:
-        ref['sha256'] = sha256_json(value)
-    return ref
-
-
-def integrity_gate(name: str, result: dict, *, required=True):
-    raw = result.get('status') or result.get('decision') or result.get('ok')
-    passed = raw in ('ok', 'pass', True)
-    if raw == 'warning' and not required:
-        passed = True
-    payload = {'name': name, 'required': required, 'status': 'pass' if passed else 'fail'}
-    if isinstance(result, dict):
-        payload.update(result)
-    else:
-        payload['result'] = result
-    return payload
-
-
-
-def artifact_manifest(out: Path, names):
-    items = []
-    for name in names:
-        path = out / name
-        if path.exists():
-            data = path.read_bytes()
-            items.append({'path': name, 'sha256': sha256_bytes(data), 'size_bytes': len(data)})
-    manifest = {'schema_version': 'cernion.forecast.artifact-manifest.v1', 'created_at': dt.datetime.now(UTC).isoformat(), 'artifacts': items}
-    save_json(out / 'artifact_manifest.json', manifest)
-    manifest['sha256'] = sha256_bytes((out / 'artifact_manifest.json').read_bytes())
-    return manifest
-
-
-def compute_integrity_decision(gates):
-    required = [g for g in gates if g.get('required', True)]
-    if any(g.get('status') not in ('pass', 'ok') for g in required):
-        return {'status': 'REJECTED', 'availability_evidence': 'UNVERIFIABLE'}
-    availability = next((g for g in gates if g.get('name') == 'information_availability_check' or g.get('name') == 'information_availability'), {})
-    evidence = availability.get('evidence_level') or 'VERIFIED'
-    return {'status': 'ACCEPTED_WITH_ASSUMPTIONS' if evidence == 'ASSUMED' else 'ACCEPTED', 'availability_evidence': evidence}
-
-
-def compute_forecast_acceptance_decision(gate):
-    return {'status': 'ACCEPTED' if gate.get('status') == 'pass' else 'REJECTED', 'quality_gate_status': gate.get('status'), 'checks': gate.get('checks')}
-
-def build_integrity_receipt(*, operation: str, tenant_id=None, series_id=None, as_of=None, information_cutoff_value=None, artifacts=None, gates=None, links=None, integrity_decision=None, forecast_acceptance_decision=None):
-    gate_items = gates or []
-    gate_map = {}
-    for gate in gate_items:
-        key = gate.get('name', 'gate')
-        if key.startswith('information_availability'):
-            key = 'availability'
-        elif key.endswith('_quality') or key == 'quality_report':
-            key = key.replace('_quality', '_quality_report') if key.endswith('_quality') else 'quality_report'
-        gate_map[key] = {k: v for k, v in gate.items() if k != 'name'}
-    integrity_decision = integrity_decision or compute_integrity_decision(gate_items)
-    status = 'pass' if integrity_decision.get('status') in ('ACCEPTED', 'ACCEPTED_WITH_ASSUMPTIONS') else 'fail'
-    receipt = {
-        'contract_id': 'CET-FC-DIC-001',
-        'receipt_schema_version': 'cernion.forecast.integrity-receipt.v1',
-        'status': status,
-        'operation': operation,
-        'created_at': dt.datetime.now(UTC).isoformat(),
-        'created_by': f'cernion-forecast-cli/{CLI_VERSION}',
-        'tenant_id': tenant_id,
-        'series_id': series_id,
-        'as_of': as_of.isoformat() if isinstance(as_of, dt.datetime) else as_of,
-        'information_cutoff': information_cutoff_value.isoformat() if isinstance(information_cutoff_value, dt.datetime) else information_cutoff_value,
-        'integrity_decision': integrity_decision,
-        'forecast_acceptance_decision': forecast_acceptance_decision,
-        'gates': gate_map,
-        'artifacts': artifacts or {},
-        'links': links or {},
-    }
-    receipt['receipt_hash'] = sha256_json({k: v for k, v in receipt.items() if k != 'receipt_hash'})
-    return receipt
-
-
-def save_integrity_receipt(out: Path, receipt: dict):
-    save_json(out / 'integrity_receipt.json', receipt)
-    return receipt
 
 def history_days_before_d2(history_by_ts, forecast_for: dt.date, timezone: str, min_days: int):
     return training_window_check(history_by_ts, forecast_for, timezone, min_days)
@@ -1778,7 +1503,7 @@ def cmd_e2e(args):
         lines.append(f"- {'OK' if value else 'FAIL'} {key}")
     (args.out / 'e2e-report.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
     manifest_hash = artifact_manifest(args.out, ['run_manifest.json', 'prediction_result.json', 'baseline_metrics.json', 'quality_gate.json', 'e2e-summary.json', 'residuals.json', 'residuals.csv', 'e2e-report.md'])
-    receipt = build_integrity_receipt(operation='e2e', tenant_id=tenant, series_id=history['series_id'], as_of=as_of, information_cutoff_value=cutoff, artifacts={'artifact_manifest': {'path': 'artifact_manifest.json', 'sha256': manifest_hash['sha256']}}, gates=receipt_gates, links={'artifact_manifest': 'artifact_manifest.json', 'run_manifest': 'run_manifest.json', 'data_import': 'run_manifest.json#history_result', 'training': 'run_manifest.json#train_result', 'prediction': 'prediction_result.json', 'quality_report': 'quality_gate.json'}, forecast_acceptance_decision=forecast_acceptance)
+    receipt = build_integrity_receipt(cli_version=CLI_VERSION, operation='e2e', tenant_id=tenant, series_id=history['series_id'], as_of=as_of, information_cutoff_value=cutoff, artifacts={'artifact_manifest': {'path': 'artifact_manifest.json', 'sha256': manifest_hash['sha256']}}, gates=receipt_gates, links={'artifact_manifest': 'artifact_manifest.json', 'run_manifest': 'run_manifest.json', 'data_import': 'run_manifest.json#history_result', 'training': 'run_manifest.json#train_result', 'prediction': 'prediction_result.json', 'quality_report': 'quality_gate.json'}, forecast_acceptance_decision=forecast_acceptance)
     save_integrity_receipt(args.out, receipt)
     print('\n'.join(lines))
     return 0 if gate['status'] == 'pass' else 50
@@ -1788,30 +1513,10 @@ def cmd_e2e(args):
 def cmd_verify_receipt(args):
     fresh_out(args.out, getattr(args, 'resume_out', False))
     receipt_path = args.receipt if getattr(args, 'receipt', None) else args.run_dir / 'integrity_receipt.json'
-    receipt = read_json(receipt_path)
-    run_dir = receipt_path.parent
-    manifest_ref = (receipt.get('artifacts') or {}).get('artifact_manifest') or {}
-    manifest_path = run_dir / (manifest_ref.get('path') or 'artifact_manifest.json')
-    manifest = read_json(manifest_path)
-    checks = []
-    expected_manifest_hash = manifest_ref.get('sha256')
-    if expected_manifest_hash and sha256_bytes(manifest_path.read_bytes()) != expected_manifest_hash:
-        checks.append({'path': manifest_path.name, 'status': 'failed', 'reason': 'artifact manifest hash mismatch'})
-    for item in manifest.get('artifacts') or []:
-        path = run_dir / item['path']
-        if not path.exists():
-            checks.append({'path': item['path'], 'status': 'failed', 'reason': 'artifact missing'})
-            continue
-        actual = sha256_bytes(path.read_bytes())
-        if actual != item.get('sha256'):
-            checks.append({'path': item['path'], 'status': 'failed', 'reason': 'artifact hash mismatch', 'expected': item.get('sha256'), 'actual': actual})
-        else:
-            checks.append({'path': item['path'], 'status': 'ok'})
-    status = 'ok' if all(c['status'] == 'ok' for c in checks) else 'failed'
-    report = {'status': status, 'receipt': str(receipt_path), 'artifact_manifest': str(manifest_path), 'checks': checks}
+    report = verify_receipt(receipt_path)
     save_json(args.out / 'receipt_verification.json', report)
-    if status != 'ok':
-        raise ValueError('; '.join(c['reason'] for c in checks if c['status'] != 'ok'))
+    if report['status'] != 'ok':
+        raise ValueError('; '.join(c['reason'] for c in report['checks'] if c['status'] != 'ok'))
     print('Receipt verified: ' + str(args.out / 'receipt_verification.json'))
 
 def cmd_doctor(args):
