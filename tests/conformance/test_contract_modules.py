@@ -1,7 +1,11 @@
 import datetime as dt
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'src'))
 
 from cernion_forecast_cli.availability import resolve_available_at
 from cernion_forecast_cli.evidence import artifact_manifest, build_integrity_receipt, save_json, save_integrity_receipt, verify_receipt
