@@ -2,6 +2,8 @@
 
 `e2e` is the command for a live operational proof. It does not merely test whether API calls succeed; it checks whether the produced forecast is acceptable for a selected operating profile.
 
+This behavior is governed by the proposed binding data-integrity contract [CET-FC-DIC-001](data-integrity-contract.md). The contract is the fachliche reference for D-2 information cutoff, forecast-horizon integrity, baseline availability and Evidence Receipts; its current status is `Proposed / Nicht freigegeben`, so implementation claims must stay limited to tested rules.
+
 ## Flow
 
 ```text

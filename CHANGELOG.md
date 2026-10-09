@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project follows semantic-versioning intent. Before `1.0.0`, command names and core artifact names are intended to be stable, but JSON artifact details may still evolve when necessary.
 
+## [Unreleased]
+
+### Documentation
+
+- Added `docs/data-integrity-contract.md` as the binding proposed fachliche data-integrity contract (`CET-FC-DIC-001`) for CernionForecastCLI, CET Forecast API and forecast validation work. The contract is explicitly `Proposed / Nicht freigegeben`; implementations may only claim conformance to implemented and tested parts until section 14 is resolved.
+
 ## [0.2.2] - 2026-10-09
 
 ### Critical fixes
